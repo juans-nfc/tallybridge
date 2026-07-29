@@ -1,0 +1,45 @@
+# TallyBridge — SIMS packing-line files to Paycom timecard imports
+#
+# Settings come from .env (deploy.sh creates it on first run):
+#   TB_DATA   host folder for incoming/converted/processed/failed
+#   TB_PORT   host port the UI listens on
+#   TB_PREFIX subpath behind nginx, e.g. /tallybridge
+
+services:
+
+  # ---- The UI: started by default -----------------------------------------
+  web:
+    build: .
+    image: tallybridge
+    container_name: tallybridge-web
+    command: >
+      python3 timecard_web.py
+      --host 0.0.0.0 --port 8080
+      --watch-dir /data/incoming
+      --output-dir /data/converted
+      --staging-dir /data/staging
+    environment:
+      URL_PREFIX: "${TB_PREFIX:-/tallybridge}"
+    ports:
+      - "${TB_PORT:-8087}:8080"
+    volumes:
+      - "${TB_DATA:-/srv/tallybridge}:/data"
+    restart: unless-stopped
+
+  # ---- The automatic watcher: off until you ask for it ---------------------
+  # Behind a compose profile, so `docker compose up -d` starts only the UI.
+  # Turn it on with:  ./deploy.sh --auto
+  watcher:
+    build: .
+    image: tallybridge
+    container_name: tallybridge-watcher
+    profiles: ["auto"]
+    command: >
+      python3 timecard_converter.py watch
+      --watch-dir /data/incoming
+      --output-dir /data/converted
+      --processed-dir /data/processed
+      --failed-dir /data/failed
+    volumes:
+      - "${TB_DATA:-/srv/tallybridge}:/data"
+    restart: unless-stopped
