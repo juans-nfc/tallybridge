@@ -24,15 +24,16 @@ UI. Nothing converts unattended until you ask for it.
 On the server, first time:
 
 ```bash
-git clone <your-repo-url> /opt/tallybridge
-cd /opt/tallybridge
+git clone <your-repo-url> /var/www/html/tallybridge
+cd /var/www/html/tallybridge
 ./deploy.sh
+./deploy.sh --install-nginx
 ```
 
 Every time after:
 
 ```bash
-cd /opt/tallybridge
+cd /var/www/html/tallybridge
 ./deploy.sh --pull
 ```
 
@@ -50,6 +51,8 @@ on its port.
 | `./deploy.sh --logs` | Follow the logs |
 | `./deploy.sh --stop` | Stop everything |
 | `./deploy.sh --nginx` | Print the nginx block for the subpath |
+| `./deploy.sh --install-nginx` | Install that block, test it, reload nginx |
+| `./deploy.sh --check` | Confirm the public URL answers |
 
 ### Settings — `.env`
 
@@ -60,26 +63,53 @@ its own. Edit and re-run `./deploy.sh` to apply.
 TB_DATA=/srv/tallybridge                    # host folder for the data folders
 TB_PORT=8087                                # host port the UI listens on
 TB_PREFIX=/tallybridge                      # subpath behind nginx
-PUBLIC_URL=https://tools.northernfruit.com  # only used for the summary output
+PUBLIC_URL=https://tools.northernfruit.com  # used for the summary and --check
+TB_AUTH=auto                                # auto | on | off — M365 SSO gate
 ```
 
-Change `TB_PORT` if 8087 collides with something else on the box.
+`TB_PORT=8087` was picked because it doesn't collide with anything on
+tools.northernfruit.com (3000, 3100, 4180, 8000, 8080, 8081, 8090, 8091, 8850
+are in use).
 
 ### nginx
 
-The app is subpath-aware — it reads `X-Forwarded-Prefix`, so links and forms
-resolve correctly under `/tallybridge`. Run `./deploy.sh --nginx` to print the
-block for your `tools.northernfruit.com` server config, add it, then:
+`./deploy.sh --install-nginx` does the whole job:
 
-```bash
-sudo nginx -t && sudo systemctl reload nginx
+1. Writes the proxy config to `/etc/nginx/snippets/tallybridge.conf`.
+2. Finds the server block for `PUBLIC_URL` — specifically the **TLS** block,
+   since the hostname also appears in the `:80` redirect block where a
+   `location` would never be reached.
+3. Backs the file up, adds one line (`include snippets/tallybridge.conf;`),
+   runs `nginx -t`, and **restores the backup if nginx objects**.
+4. Reloads nginx and checks the public URL responds.
+
+Re-running is safe — if the include line is already there, nothing is edited.
+To see the config without installing it: `./deploy.sh --nginx`.
+
+If nginx runs in a container or behind Nginx Proxy Manager, the script says so
+and prints what to enter there instead (forward target, location, the
+`X-Forwarded-Prefix` header, and the 25 MB body limit).
+
+**Why the header matters:** the proxy strips the `/tallybridge` prefix, so the
+app reads `X-Forwarded-Prefix` to build its links. Without it every form and
+download on the page would point at the wrong path.
+
+### M365 sign-in
+
+`TB_AUTH=auto` (the default) gates TallyBridge behind the same oauth2-proxy
+SSO your other apps use, if the script finds it configured in nginx — matching
+how `/scalehouse` and `/fta` are protected. Since these files are payroll data,
+leave it on.
+
+When SSO is active the page shows who is signed in, and every save is logged
+with their address:
+
+```
+2026-07-29 16:05:41  NF-Y2026M02D05.xlsx saved from NF-Y2026M02D05.txt by jsmith@northernfruit.com
 ```
 
-Then it's live at **https://tools.northernfruit.com/tallybridge/**
-
-The page has no login of its own — it inherits whatever protects
-`tools.northernfruit.com`. If that host is reachable from outside, put auth in
-front of this location block.
+Set `TB_AUTH=off` for an ungated location, or `on` to require the gate even if
+auto-detection misses it.
 
 ---
 

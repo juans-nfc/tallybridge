@@ -212,6 +212,7 @@ BASE_CSS = """
   .lines { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; }
   .tag { border: 1.5px solid rgba(244,242,231,.65); padding: 2px 10px; font-size: 12px;
     letter-spacing: .18em; text-transform: uppercase; }
+  .who { color: #F4F2E7; font-size: 12px; text-align: right; opacity: .85; line-height: 1.35; }
   header a { color: #F4F2E7; font-size: 14px; text-decoration: none;
     border-bottom: 1px solid rgba(244,242,231,.5); }
   .card { background: var(--card); border: 1px solid var(--mist); border-radius: 8px;
@@ -260,6 +261,7 @@ INDEX_PAGE = """
     <div class="lines"><span class="tag">Northern Fruit &mdash; NF</span>
       <span class="tag">Ice Lakes &mdash; IL</span></div>
   </div>
+  {% if user %}<div class="who">signed in as<br><strong>{{ user }}</strong></div>{% endif %}
 </div></header>
 <div class="wrap">
 
@@ -509,6 +511,12 @@ def prune_staging(max_age_hours=12):
             shutil.rmtree(slot, ignore_errors=True)
 
 
+def signed_in_user():
+    """The M365 address oauth2-proxy forwards, if the page is gated by SSO."""
+    return (request.headers.get("X-Auth-Request-Email")
+            or request.headers.get("X-Auth-Request-User") or "")
+
+
 def human_size(n):
     return f"{n / 1024:.0f} KB" if n < 1024 * 1024 else f"{n / 1048576:.1f} MB"
 
@@ -534,7 +542,8 @@ def index():
         if CFG["watch_dir"].exists() else []
     return render_template_string(INDEX_PAGE, recent=list_recent(), pending=pending,
                                   watch_dir=CFG["watch_dir"],
-                                  mapping=sorted(PACKAGE_CODES.items()))
+                                  mapping=sorted(PACKAGE_CODES.items()),
+                                  user=signed_in_user())
 
 
 @app.post("/preview")
@@ -603,6 +612,10 @@ def save(token):
         return redirect(url_for("preview", token=token))
     clear_slot(token)
 
+    who = signed_in_user()
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {out_path.name} saved from {name}"
+          f"{' by ' + who if who else ''}", flush=True)
+
     link = url_for("download", filename=out_path.name)
     extra = " Import CSV saved alongside it." if want_csv else ""
     flash(f"Saved {escape(out_path.name)} from {escape(name)}.{extra} "
@@ -640,6 +653,9 @@ def process_incoming():
             shutil.move(str(txt_path), processed_dir / txt_path.name)
 
     if ok:
+        who = signed_in_user()
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  converted from incoming folder: "
+              f"{', '.join(ok)}{' by ' + who if who else ''}", flush=True)
         flash(f"Converted {len(ok)} file{'' if len(ok) == 1 else 's'}: "
               f"{', '.join(str(escape(n)) for n in ok)}", "ok")
     if bad:

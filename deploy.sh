@@ -13,6 +13,8 @@
 #   ./deploy.sh --logs          follow the logs, then exit
 #   ./deploy.sh --stop          stop everything, then exit
 #   ./deploy.sh --nginx         print the nginx config to serve it at a subpath
+#   ./deploy.sh --install-nginx install that config into nginx, test, and reload
+#   ./deploy.sh --check         verify the public URL actually answers
 #   ./deploy.sh --help
 #
 set -euo pipefail
@@ -22,6 +24,7 @@ TB_DATA_DEFAULT="/srv/tallybridge"
 TB_PORT_DEFAULT="8087"
 TB_PREFIX_DEFAULT="/tallybridge"
 PUBLIC_URL_DEFAULT="https://tools.northernfruit.com"
+TB_AUTH_DEFAULT="auto"     # auto | on | off — gate behind M365 SSO (oauth2-proxy)
 
 APP="TallyBridge"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,6 +51,8 @@ while [ $# -gt 0 ]; do
     --logs)      ACTION="logs" ;;
     --stop)      ACTION="stop" ;;
     --nginx)     ACTION="nginx" ;;
+    --install-nginx) ACTION="install-nginx" ;;
+    --check)     ACTION="check" ;;
     -h|--help)   awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *)           die "unknown option: $1  (try --help)" ;;
   esac
@@ -74,6 +79,8 @@ TB_DATA=$TB_DATA_DEFAULT
 TB_PORT=$TB_PORT_DEFAULT
 TB_PREFIX=$TB_PREFIX_DEFAULT
 PUBLIC_URL=$PUBLIC_URL_DEFAULT
+# M365 SSO: auto = gate it if oauth2-proxy is already set up in nginx
+TB_AUTH=$TB_AUTH_DEFAULT
 EOF
   ok "created .env (data folder, port, and subpath live here)"
 fi
@@ -83,8 +90,68 @@ TB_DATA="${TB_DATA:-$TB_DATA_DEFAULT}"
 TB_PORT="${TB_PORT:-$TB_PORT_DEFAULT}"
 TB_PREFIX="${TB_PREFIX:-$TB_PREFIX_DEFAULT}"
 PUBLIC_URL="${PUBLIC_URL:-$PUBLIC_URL_DEFAULT}"
+TB_AUTH="${TB_AUTH:-$TB_AUTH_DEFAULT}"
 PROFILE_ARGS=()
 [ "$WITH_AUTO" = "1" ] && PROFILE_ARGS=(--profile auto)
+
+NGINX_ROOT="${NGINX_ROOT:-/etc/nginx}"      # override only for testing
+PUBLIC_HOST="${PUBLIC_URL#*://}"; PUBLIC_HOST="${PUBLIC_HOST%%/*}"
+SNIPPET_REL="snippets/tallybridge.conf"
+SNIPPET_PATH="$NGINX_ROOT/$SNIPPET_REL"
+
+# Is oauth2-proxy (M365 SSO) already configured on this host?
+sso_available() {
+  grep -rqs "location @oauth2_signin" \
+    "$NGINX_ROOT/sites-enabled" "$NGINX_ROOT/sites-available" "$NGINX_ROOT/conf.d" 2>/dev/null
+}
+
+# Should this location be gated behind SSO?
+use_sso() {
+  case "$TB_AUTH" in
+    on)  return 0 ;;
+    off) return 1 ;;
+    *)   sso_available ;;
+  esac
+}
+
+# The proxy config, printed by --nginx and written by --install-nginx.
+nginx_config() {
+  local auth="" authset=""
+  if use_sso; then
+    auth='    auth_request /oauth2/auth;
+    error_page 401 = @oauth2_signin;
+'
+    authset='
+    # pass the signed-in M365 user through, so saves can be attributed
+    auth_request_set $tb_email $upstream_http_x_auth_request_email;
+    proxy_set_header X-Auth-Request-Email $tb_email;'
+  fi
+  cat <<EOF
+# TallyBridge — managed by deploy.sh, edits here are overwritten
+location = ${TB_PREFIX} { return 301 ${TB_PREFIX}/; }
+
+location ^~ ${TB_PREFIX}/ {
+${auth}    proxy_pass         http://127.0.0.1:${TB_PORT}/;
+    proxy_http_version 1.1;
+    proxy_set_header   Host               \$host;
+    proxy_set_header   X-Real-IP          \$remote_addr;
+    proxy_set_header   X-Forwarded-For    \$proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto  \$scheme;
+    proxy_set_header   X-Forwarded-Prefix ${TB_PREFIX};
+    client_max_body_size 25m;      # packing-line uploads
+    proxy_read_timeout 120s;       # conversion of a large day${authset}
+}
+EOF
+}
+
+# Does the public URL answer? Used by --check and after --install-nginx.
+check_public() {
+  local url="${PUBLIC_URL%/}${TB_PREFIX}/"
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)"
+  printf '      %s -> %s\n' "$url" "${code:-no response}"
+  [ "$code" = "200" ]
+}
 
 # --- short-circuit actions -------------------------------------------------
 case "$ACTION" in
@@ -101,21 +168,165 @@ case "$ACTION" in
     ok "stopped"
     exit 0 ;;
   nginx)
-    cat <<EOF
-# Add inside the server block for ${PUBLIC_URL#*://} on your nginx host,
-# then: sudo nginx -t && sudo systemctl reload nginx
+    printf '# Add inside the server block for %s, then reload nginx.\n' "$PUBLIC_HOST"
+    printf '# Or let this script do it:  ./deploy.sh --install-nginx\n\n'
+    nginx_config
+    exit 0 ;;
 
-location ${TB_PREFIX}/ {
-    proxy_pass         http://127.0.0.1:${TB_PORT}/;
-    proxy_set_header   Host              \$host;
-    proxy_set_header   X-Real-IP         \$remote_addr;
-    proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
-    proxy_set_header   X-Forwarded-Proto \$scheme;
-    proxy_set_header   X-Forwarded-Prefix ${TB_PREFIX};
-    client_max_body_size 25m;      # packing-line uploads
-}
-location = ${TB_PREFIX} { return 301 ${TB_PREFIX}/; }
-EOF
+  check)
+    say "Checking $APP is reachable"
+    printf '      container   : '
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:${TB_PORT}${TB_PREFIX}/" 2>/dev/null || true
+    printf '  (expect 200)\n'
+    say "Public URL"
+    if check_public; then
+      ok "reachable"
+    else
+      warn "not answering yet — if the container is up, nginx probably isn't"
+      warn "proxying this path. Run:  ./deploy.sh --install-nginx"
+    fi
+    exit 0 ;;
+
+  install-nginx)
+    say "Installing the nginx proxy config"
+
+    if ! command -v nginx >/dev/null 2>&1; then
+      warn "no nginx on this host"
+      printf '\n  If nginx runs in a container or you use Nginx Proxy Manager,\n'
+      printf '  add the proxy there instead:\n'
+      printf '    Forward to      : %s port %s\n' "$(hostname -I 2>/dev/null | awk '{print $1}')" "$TB_PORT"
+      printf '    Location        : %s/\n' "$TB_PREFIX"
+      printf '    Custom header   : X-Forwarded-Prefix: %s\n' "$TB_PREFIX"
+      printf '    Max body size   : 25m\n\n'
+      printf '  Full config to paste:  ./deploy.sh --nginx\n'
+      exit 1
+    fi
+
+    SUDO=""
+    [ "$(id -u)" != "0" ] && SUDO="sudo"
+
+    if use_sso; then
+      ok "M365 SSO detected — TallyBridge will require sign-in"
+    else
+      warn "no SSO gate on this location (TB_AUTH=$TB_AUTH)"
+    fi
+
+    # 1. write the snippet (safe: its own file, nothing else touched)
+    $SUDO mkdir -p "$NGINX_ROOT/snippets"
+    nginx_config | $SUDO tee "$SNIPPET_PATH" >/dev/null
+    ok "wrote $SNIPPET_PATH"
+
+    # 2. find the server block for the public host
+    TARGET=""
+    for d in "$NGINX_ROOT/sites-enabled" "$NGINX_ROOT/sites-available" "$NGINX_ROOT/conf.d"; do
+      [ -d "$d" ] || continue
+      while IFS= read -r f; do
+        [ -n "$f" ] && TARGET="$f" && break
+      done < <(grep -rls -E "server_name[[:space:]]+[^;]*${PUBLIC_HOST}" "$d" 2>/dev/null || true)
+      [ -n "$TARGET" ] && break
+    done
+
+    if [ -z "$TARGET" ]; then
+      warn "couldn't find a server block for $PUBLIC_HOST under $NGINX_ROOT"
+      printf '      Add this line inside that server block yourself:\n'
+      printf '        include %s;\n' "$SNIPPET_REL"
+      printf '      then: %s nginx -t && %s systemctl reload nginx\n' "$SUDO" "$SUDO"
+      exit 1
+    fi
+    ok "found server block: $TARGET"
+
+    # 3. already included? then nothing to edit
+    if grep -q "$SNIPPET_REL" "$TARGET"; then
+      ok "include line already present"
+    else
+      BACKUP="${TARGET}.tallybridge-backup.$(date +%Y%m%d%H%M%S)"
+      $SUDO cp "$TARGET" "$BACKUP"
+      ok "backed up to $BACKUP"
+
+      # A hostname usually appears in two server blocks: the :80 redirect and
+      # the real :443 one. The include has to land in the TLS block, or the
+      # location would sit in a block that only issues redirects.
+      TMP="$(mktemp)"
+      awk -v host="$PUBLIC_HOST" -v inc="    include $SNIPPET_REL;" '
+        {
+          lines[NR] = $0
+          last = NR
+          opens  = gsub(/\{/, "{")
+          closes = gsub(/\}/, "}")
+
+          if (depth == 0 && $0 ~ /server[[:space:]]*\{/) {
+            inblock = 1; hasHost = 0; isTLS = 0; snLine = 0
+          }
+          if (inblock) {
+            if ($1 == "server_name" && index($0, host)) { hasHost = 1; snLine = NR }
+            if ($0 ~ /listen[[:space:]]+[^;]*443/ || $0 ~ /ssl_certificate/) isTLS = 1
+          }
+
+          depth += opens - closes
+
+          if (inblock && depth == 0) {
+            if (hasHost && isTLS && !tlsLine)      tlsLine = snLine
+            else if (hasHost && !plainLine)        plainLine = snLine
+            inblock = 0
+          }
+        }
+        END {
+          target = tlsLine ? tlsLine : plainLine
+          if (!target) exit 3
+          for (i = 1; i <= last; i++) {
+            print lines[i]
+            if (i == target) print inc
+          }
+          printf("chose line %d (%s)\n", target, tlsLine ? "TLS block" : "only match") > "/dev/stderr"
+        }
+      ' "$TARGET" > "$TMP" 2>"$TMP.why"
+      AWK_RC=$?
+
+      if [ "$AWK_RC" != "0" ] || ! grep -q "$SNIPPET_REL" "$TMP"; then
+        rm -f "$TMP" "$TMP.why"
+        warn "could not place the include line automatically"
+        printf '      Add it inside the :443 server block yourself:  include %s;\n' "$SNIPPET_REL"
+        exit 1
+      fi
+      ok "$(sed 's/^/insert point: /' "$TMP.why" | tr -d '\n')"
+      rm -f "$TMP.why"
+
+      $SUDO cp "$TMP" "$TARGET"; rm -f "$TMP"
+      ok "added: include $SNIPPET_REL"
+
+      # 4. test, and undo the edit if nginx is unhappy
+      if ! $SUDO nginx -t >/dev/null 2>&1; then
+        $SUDO cp "$BACKUP" "$TARGET"
+        warn "nginx rejected the config — your original file has been restored"
+        printf '\n'
+        $SUDO nginx -t 2>&1 | sed 's/^/      /' || true
+        exit 1
+      fi
+      ok "nginx -t passed"
+    fi
+
+    # 5. reload
+    if $SUDO nginx -t >/dev/null 2>&1; then
+      if command -v systemctl >/dev/null 2>&1; then
+        $SUDO systemctl reload nginx
+      else
+        $SUDO nginx -s reload
+      fi
+      ok "nginx reloaded"
+    else
+      warn "nginx -t is failing for an unrelated reason; not reloading"
+      $SUDO nginx -t 2>&1 | sed 's/^/      /' || true
+      exit 1
+    fi
+
+    say "Verifying the public URL"
+    if check_public; then
+      ok "$APP is live"
+    else
+      warn "nginx is configured but the URL didn't return 200"
+      warn "is the container running?  ./deploy.sh --status"
+    fi
     exit 0 ;;
 esac
 
