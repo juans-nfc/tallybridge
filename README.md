@@ -294,6 +294,12 @@ The lines produce two shapes and TallyBridge detects which it's handed:
   endings. Field boundaries are worked out from the file itself (any column
   blank on every row is a separator), so a change in padding doesn't break it.
 
+**Badge numbers are zero-padded to 7 digits** on the way out, because that is
+the width Paycom expects: SIMS writes `0303`, the workbook carries `0000303`.
+A badge that is already 7 digits is left alone; one that is longer, or not
+numeric, passes through untouched and is flagged on the preview rather than
+mangled.
+
 **Rows with no packer ID** appear in some exports — the line writes a code and
 a piece count with the Employee ID column blank. Those rows are left out of the
 workbook, because Paycom can't import a blank Employee ID, and the count and
@@ -307,7 +313,7 @@ a house employee number, that's a small change to `convert()`.
 |---|---|
 | 1 — date/batch code (`0205261P1`) | C — Date |
 | 2 — line number | *(not imported)* |
-| 3 — packer ID (`0303`) | A — Employee ID (text, leading zeros kept) |
+| 3 — packer ID (`0303`) | A — Employee ID, **zero-padded to 7 digits** (`0000303`) |
 | 4 — SIMS package code (`510`) | F — Earning Code, **translated to Paycom** (`T10`) |
 | 5 — allocation (`10100121`) | I — Labor Allocation Code (number) |
 | 6 — pieces (`0001`) | N — Units (text, leading zeros kept) |

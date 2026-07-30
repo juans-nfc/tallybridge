@@ -31,7 +31,8 @@ from markupsafe import escape
 from werkzeug.utils import secure_filename
 
 from timecard_converter import (DEFAULT_OUTPUT_DIR, DEFAULT_TEMPLATE,
-                                DEFAULT_WATCH_DIR, FILE_PATTERNS, PACKAGE_CODES,
+                                DEFAULT_WATCH_DIR, EMP_ID_WIDTH, FILE_PATTERNS,
+                                PACKAGE_CODES,
                                 convert, find_candidates, parse_txt,
                                 unmapped_codes)
 
@@ -145,6 +146,13 @@ def summarize(all_rows, source_name):
             "those rows keep the SIMS code and payroll will likely reject them. "
             "Add the code to PACKAGE_CODES in timecard_converter.py.")
 
+    odd = sorted({r.emp_id_raw for r in rows if r.odd_badge})
+    if odd:
+        notes.append(
+            f"Badge number(s) {', '.join(odd)} aren't {EMP_ID_WIDTH} digits after "
+            f"padding — they go to Paycom exactly as they appear, which it may "
+            f"reject. Check them against the badge list.")
+
     if bad_units:
         notes.append(f"{len(bad_units)} row(s) have a non-numeric piece count "
                      f"(e.g. packer {bad_units[0].emp_id}: {bad_units[0].units!r}) — "
@@ -191,8 +199,11 @@ def summarize(all_rows, source_name):
         for p in packers
     ]
 
+    pad_example = next(((r.emp_id_raw, r.emp_id) for r in rows if r.padded), None)
+
     return {
         "source": source_name,
+        "pad_example": pad_example,
         "row_count": len(rows),
         "orphan_count": len(orphans),
         "orphan_units": orphan_units,
@@ -528,10 +539,10 @@ PREVIEW_PAGE = """
         <td class="was">{{ r.sims_code }}{% if r.description %} &middot; {{ r.description }}{% endif %}</td></tr>
       {% endfor %}
     </table></div>
-    {% if truncated %}
-    <p class="hint">Showing the first {{ rows | length }} of {{ s.row_count }} rows.
-       All {{ s.row_count }} are saved.</p>
-    {% endif %}
+    <p class="hint">Employee ID is zero-padded to {{ emp_width }} digits for Paycom{% if s.pad_example %}
+       (badge {{ s.pad_example[0] }} becomes {{ s.pad_example[1] }}){% endif %}.
+       {% if truncated %}Showing the first {{ rows | length }} of {{ s.row_count }} rows;
+       all {{ s.row_count }} are saved.{% endif %}</p>
 
     <div class="actions">
       <form method="post" action="{{ url_for('save', token=token) }}">
@@ -676,7 +687,7 @@ def preview(token):
         PREVIEW_PAGE, s=summarize(rows, name), token=token,
         rows=writable[:PREVIEW_ROW_LIMIT],
         truncated=len(writable) > PREVIEW_ROW_LIMIT,
-        out_name=Path(name).stem + ".xlsx")
+        out_name=Path(name).stem + ".xlsx", emp_width=EMP_ID_WIDTH)
 
 
 @app.post("/save/<token>")

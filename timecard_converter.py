@@ -76,7 +76,8 @@ TEMPLATE_SHEET = "Import Template"
 
 class Row(NamedTuple):
     """One line of a packing-line file, ready for the import template."""
-    emp_id: str          # column A
+    emp_id: str          # column A — zero-padded to EMP_ID_WIDTH for Paycom
+    emp_id_raw: str      # the badge number exactly as SIMS wrote it
     date_code: str       # column C
     sims_code: str       # source code, kept for display and troubleshooting
     paycom_code: str     # column F — what payroll actually receives
@@ -92,6 +93,17 @@ class Row(NamedTuple):
     def assigned(self) -> bool:
         """False for rows the line wrote with no packer ID in them."""
         return bool(self.emp_id)
+
+    @property
+    def padded(self) -> bool:
+        """True when the badge number was widened for Paycom."""
+        return self.emp_id != self.emp_id_raw
+
+    @property
+    def odd_badge(self) -> bool:
+        """A badge that couldn't be padded to the expected width."""
+        return bool(self.emp_id_raw) and (
+            not self.emp_id_raw.isdigit() or len(self.emp_id) != EMP_ID_WIDTH)
 
 
 def log(msg: str) -> None:
@@ -118,6 +130,24 @@ def translate_code(sims_code: str):
 def unmapped_codes(rows) -> list:
     """Sorted list of SIMS codes in these rows that have no Paycom mapping."""
     return sorted({r.sims_code for r in rows if not r.mapped})
+
+
+# Paycom expects the Employee ID (badge number) as exactly this many digits,
+# zero-padded: SIMS writes 0303, Paycom wants 0000303.
+EMP_ID_WIDTH = 7
+
+
+def normalize_emp_id(raw: str) -> str:
+    """Zero-pad a badge number to the width Paycom expects.
+
+    An empty field stays empty — a row with no packer must not become badge
+    0000000. A number already at or over the width, or anything non-numeric,
+    is passed through untouched and flagged for review instead of mangled.
+    """
+    emp = raw.strip()
+    if not emp or not emp.isdigit():
+        return emp
+    return emp.zfill(EMP_ID_WIDTH)
 
 
 # Expected field widths, used only to work out which column is missing when a
@@ -202,7 +232,8 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
         alloc_val = int(alloc) if alloc.isdigit() else alloc
 
         rows.append(Row(
-            emp_id=emp_id,
+            emp_id=normalize_emp_id(emp_id),
+            emp_id_raw=emp_id.strip(),
             date_code=date_code,
             sims_code=sims_code,
             paycom_code=paycom_code,
