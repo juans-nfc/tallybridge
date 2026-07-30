@@ -88,6 +88,11 @@ class Row(NamedTuple):
     def mapped(self) -> bool:
         return self.sims_code in PACKAGE_CODES
 
+    @property
+    def assigned(self) -> bool:
+        """False for rows the line wrote with no packer ID in them."""
+        return bool(self.emp_id)
+
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}", flush=True)
@@ -115,38 +120,96 @@ def unmapped_codes(rows) -> list:
     return sorted({r.sims_code for r in rows if not r.mapped})
 
 
+# Expected field widths, used only to work out which column is missing when a
+# fixed-width file happens to have one column blank on every single row.
+EXPECTED_WIDTHS = {"date": 9, "emp": 4, "code": 3, "alloc": 8, "units": 4}
+
+
+def sniff_columns(lines) -> list:
+    """Work out fixed-width field boundaries from the file itself.
+
+    A column is a separator if it is blank on every line, so the field
+    boundaries fall out of the data — no hard-coded offsets to break when the
+    line export changes its padding.
+    """
+    width = max(len(l) for l in lines)
+    is_sep = [all(len(l) <= i or l[i] == " " for l in lines) for i in range(width)]
+
+    fields, start = [], None
+    for i, sep in enumerate(is_sep + [True]):
+        if not sep and start is None:
+            start = i
+        elif sep and start is not None:
+            fields.append((start, i))
+            start = None
+    return fields
+
+
+def split_fixed(line: str, columns: list) -> list:
+    return [line[a:b].strip() for a, b in columns]
+
+
 def parse_txt(txt_path: Path, strict: bool = False) -> list:
-    """Parse a tab-delimited packing-line file into Row records."""
+    """Parse a packing-line file into Row records.
+
+    Handles both layouts the lines produce: tab-delimited, and space-aligned
+    fixed width (with either LF or CRLF line endings).
+    """
+    with open(txt_path, "r", encoding="utf-8-sig", newline="") as fh:
+        raw_lines = [l.rstrip("\r\n") for l in fh]
+    lines = [l for l in raw_lines if l.strip()]
+    if not lines:
+        raise ValueError(f"{txt_path.name}: no data rows found")
+
+    tab_delimited = any("\t" in l for l in lines)
+    columns = None
+
+    if not tab_delimited:
+        columns = sniff_columns(lines)
+        if len(columns) == 5:
+            # One column is blank on every row. If the third field is 3 wide
+            # it's the package code, which means the packer column is the one
+            # missing entirely — put an empty placeholder back in its place.
+            if columns[2][1] - columns[2][0] == EXPECTED_WIDTHS["code"]:
+                columns = columns[:2] + [(columns[1][1], columns[1][1])] + columns[2:]
+        if len(columns) != 6:
+            raise ValueError(
+                f"{txt_path.name}: expected 6 columns, found {len(columns)} "
+                f"at {columns} — the line's export layout may have changed"
+            )
+
     rows = []
-    with open(txt_path, "r", encoding="utf-8-sig") as fh:
-        for lineno, line in enumerate(fh, start=1):
-            line = line.rstrip("\r\n")
-            if not line.strip():
-                continue
-            fields = line.split("\t")
+    for lineno, line in enumerate(lines, start=1):
+        if tab_delimited:
+            fields = [f.strip() for f in line.split("\t")]
             if len(fields) < 6:
                 raise ValueError(
                     f"{txt_path.name} line {lineno}: expected 6 tab-separated "
                     f"fields, found {len(fields)}: {line!r}"
                 )
-            date_code, _line_no, emp_id, sims_code, alloc, units = fields[:6]
+        else:
+            fields = split_fixed(line, columns)
 
-            paycom_code, description = translate_code(sims_code)
+        date_code, _line_no, emp_id, sims_code, alloc, units = fields[:6]
 
-            # Labor Allocation Code is stored as a number (matches the sample
-            # payroll prepared); fall back to text if it's ever non-numeric.
-            alloc = alloc.strip()
-            alloc_val = int(alloc) if alloc.isdigit() else alloc
+        if not sims_code and not units:
+            continue  # nothing usable on this line
 
-            rows.append(Row(
-                emp_id=emp_id.strip(),
-                date_code=date_code.strip(),
-                sims_code=sims_code.strip(),
-                paycom_code=paycom_code,
-                description=description,
-                alloc=alloc_val,
-                units=units.strip(),
-            ))
+        paycom_code, description = translate_code(sims_code)
+
+        # Labor Allocation Code is stored as a number (matches the sample
+        # payroll prepared); fall back to text if it's ever non-numeric.
+        alloc_val = int(alloc) if alloc.isdigit() else alloc
+
+        rows.append(Row(
+            emp_id=emp_id,
+            date_code=date_code,
+            sims_code=sims_code,
+            paycom_code=paycom_code,
+            description=description,
+            alloc=alloc_val,
+            units=units,
+        ))
 
     if not rows:
         raise ValueError(f"{txt_path.name}: no data rows found")
@@ -163,7 +226,21 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
 def convert(txt_path: Path, template_path: Path, output_dir: Path,
             also_csv: bool = False, strict: bool = False) -> Path:
     """Convert one .txt file to an .xlsx built from the payroll template."""
-    rows = parse_txt(txt_path, strict=strict)
+    all_rows = parse_txt(txt_path, strict=strict)
+
+    # Rows the line wrote with no packer ID can't go to payroll — column A
+    # would be blank. Leave them out, but never silently: report the count and
+    # the units so the day can still be reconciled against the line's totals.
+    rows = [r for r in all_rows if r.assigned]
+    orphans = [r for r in all_rows if not r.assigned]
+    if orphans:
+        orphan_units = sum(int(r.units) for r in orphans if r.units.isdigit())
+        codes = ", ".join(sorted({r.sims_code for r in orphans}))
+        log(f"WARNING: {txt_path.name} has {len(orphans)} row(s) with no packer ID "
+            f"({orphan_units} units, code(s) {codes}) — left out of the workbook, "
+            f"since payroll can't import a blank Employee ID")
+    if not rows:
+        raise ValueError(f"{txt_path.name}: every row is missing its packer ID")
 
     unknown = unmapped_codes(rows)
     if unknown:

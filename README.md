@@ -190,9 +190,25 @@ is then quarantined to `failed/` with the reason logged.
 
 ---
 
+## Source file layouts
+
+The lines produce two shapes and TallyBridge detects which it's handed:
+
+- **Tab-delimited** — six tab-separated fields per line.
+- **Space-aligned fixed width** — columns padded with spaces, CRLF or LF
+  endings. Field boundaries are worked out from the file itself (any column
+  blank on every row is a separator), so a change in padding doesn't break it.
+
+**Rows with no packer ID** appear in some exports — the line writes a code and
+a piece count with the Employee ID column blank. Those rows are left out of the
+workbook, because Paycom can't import a blank Employee ID, and the count and
+units are reported both in the preview and the log so the day still reconciles
+against the line's own totals. If payroll would rather see them posted against
+a house employee number, that's a small change to `convert()`.
+
 ## Column mapping
 
-| Source .txt field (tab-separated) | Template column |
+| Source .txt field | Template column |
 |---|---|
 | 1 — date/batch code (`0205261P1`) | C — Date |
 | 2 — line number | *(not imported)* |

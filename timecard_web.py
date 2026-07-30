@@ -85,8 +85,18 @@ PREVIEW_ROW_LIMIT = 400  # cap the on-screen table; totals always cover the whol
 # Analysis for the preview screen
 # ---------------------------------------------------------------------------
 
-def summarize(rows, source_name):
-    """Build totals, a per-packer breakdown, and review notes for one file."""
+def summarize(all_rows, source_name):
+    """Build totals, a per-packer breakdown, and review notes for one file.
+
+    Rows the line wrote with no packer ID are held out of every total, because
+    they can't be imported — but they are counted and reported so the day still
+    reconciles against the line's own numbers.
+    """
+    rows = [r for r in all_rows if r.assigned]
+    orphans = [r for r in all_rows if not r.assigned]
+    orphan_units = sum(int(r.units) for r in orphans if r.units.isdigit())
+    orphan_codes = sorted({r.sims_code for r in orphans})
+
     packers = sorted({r.emp_id for r in rows})
     date_codes = sorted({r.date_code for r in rows})
     code_counts = Counter(r.sims_code for r in rows)
@@ -108,6 +118,15 @@ def summarize(rows, source_name):
     # --- review notes -----------------------------------------------------
     notes = []
     prefixes = tuple(p.split("*")[0].upper() for p in FILE_PATTERNS)
+
+    if orphans:
+        pretty = ", ".join(
+            f"{c} ({PACKAGE_CODES.get(c, (c, ''))[0]})" for c in orphan_codes)
+        notes.append(
+            f"{len(orphans)} row(s) in this file have no packer ID at all "
+            f"({orphan_units} units on code(s) {pretty}). They are left out of the "
+            f"workbook — payroll can't import a blank Employee ID — so the file's "
+            f"own total is {orphan_units} units higher than what's shown below.")
 
     if not source_name.upper().startswith(prefixes):
         notes.append(
@@ -175,6 +194,8 @@ def summarize(rows, source_name):
     return {
         "source": source_name,
         "row_count": len(rows),
+        "orphan_count": len(orphans),
+        "orphan_units": orphan_units,
         "packer_count": len(packers),
         "date_codes": date_codes,
         "codes_in_order": codes_in_order,
@@ -341,6 +362,7 @@ PREVIEW_PAGE = """
     color: var(--stem); font-weight: 700; }
   .stat .v { font-family: Consolas, "Courier New", monospace; font-size: 26px;
     font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .stat .sub { font-size: 11.5px; color: var(--amber); margin-top: 2px; line-height: 1.3; }
   .notes { background: #FBF4E2; border: 1px solid #E6D3A3; border-left: 5px solid var(--amber);
     border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .notes h3 { font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
@@ -378,7 +400,9 @@ PREVIEW_PAGE = """
   </div>
 
   <div class="stats">
-    <div class="stat"><div class="k">Rows</div><div class="v">{{ s.row_count }}</div></div>
+    <div class="stat"><div class="k">Rows{% if s.orphan_count %} written{% endif %}</div>
+      <div class="v">{{ s.row_count }}</div>
+      {% if s.orphan_count %}<div class="sub">{{ s.orphan_count }} skipped, no packer ID</div>{% endif %}</div>
     <div class="stat"><div class="k">Packers</div><div class="v">{{ s.packer_count }}</div></div>
     <div class="stat"><div class="k">Date code</div>
       <div class="v" style="font-size:18px">{{ s.date_codes | join(', ') }}</div></div>
@@ -590,9 +614,11 @@ def preview(token):
         flash(f"Couldn't read {escape(name)}: {escape(str(exc))}", "err")
         return redirect(url_for("index"))
 
+    writable = [r for r in rows if r.assigned]
     return render_template_string(
         PREVIEW_PAGE, s=summarize(rows, name), token=token,
-        rows=rows[:PREVIEW_ROW_LIMIT], truncated=len(rows) > PREVIEW_ROW_LIMIT,
+        rows=writable[:PREVIEW_ROW_LIMIT],
+        truncated=len(writable) > PREVIEW_ROW_LIMIT,
         out_name=Path(name).stem + ".xlsx")
 
 
