@@ -24,6 +24,7 @@ TB_DATA_DEFAULT="/srv/tallybridge"
 TB_PORT_DEFAULT="8087"
 TB_PREFIX_DEFAULT="/tallybridge"
 PUBLIC_URL_DEFAULT="https://tools.northernfruit.com"
+TB_SHARE_DEFAULT="/mnt/stamper"
 TB_AUTH_DEFAULT="auto"     # auto | on | off — gate behind M365 SSO (oauth2-proxy)
 
 APP="TallyBridge"
@@ -79,6 +80,8 @@ TB_DATA=$TB_DATA_DEFAULT
 TB_PORT=$TB_PORT_DEFAULT
 TB_PREFIX=$TB_PREFIX_DEFAULT
 PUBLIC_URL=$PUBLIC_URL_DEFAULT
+# Where the payroll share is mounted on this host (used by --auto)
+TB_SHARE=$TB_SHARE_DEFAULT
 # M365 SSO: auto = gate it if oauth2-proxy is already set up in nginx
 TB_AUTH=$TB_AUTH_DEFAULT
 EOF
@@ -91,6 +94,7 @@ TB_PORT="${TB_PORT:-$TB_PORT_DEFAULT}"
 TB_PREFIX="${TB_PREFIX:-$TB_PREFIX_DEFAULT}"
 PUBLIC_URL="${PUBLIC_URL:-$PUBLIC_URL_DEFAULT}"
 TB_AUTH="${TB_AUTH:-$TB_AUTH_DEFAULT}"
+TB_SHARE="${TB_SHARE:-$TB_SHARE_DEFAULT}"
 PROFILE_ARGS=()
 [ "$WITH_AUTO" = "1" ] && PROFILE_ARGS=(--profile auto)
 
@@ -361,10 +365,22 @@ if [ "$DO_BUILD" = "1" ]; then
   ok "image built"
 fi
 
+if [ "$WITH_AUTO" = "1" ]; then
+  if mountpoint -q "$TB_SHARE" 2>/dev/null; then
+    ok "payroll share mounted at $TB_SHARE"
+  elif [ -d "$TB_SHARE" ]; then
+    warn "$TB_SHARE exists but is not a mount point — the fetcher will report"
+    warn "the share as unavailable until it's mounted (see README)"
+  else
+    warn "$TB_SHARE does not exist — the fetcher will idle until the share is"
+    warn "mounted there. Set TB_SHARE in .env if it lives elsewhere."
+  fi
+fi
+
 say "Starting containers"
 $DC "${PROFILE_ARGS[@]}" up -d --remove-orphans
 if [ "$WITH_AUTO" = "1" ]; then
-  ok "UI and automatic watcher running"
+  ok "UI, folder watcher and share fetcher running"
 else
   ok "UI running (watcher off — add --auto when you're ready)"
 fi

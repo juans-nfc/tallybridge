@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir openpyxl flask waitress
 
-COPY timecard_converter.py timecard_web.py Timecard_Import_template_CLEAN.xlsx /app/
+COPY timecard_converter.py timecard_web.py share_fetch.py Timecard_Import_template_CLEAN.xlsx /app/
 
 EXPOSE 8080
 

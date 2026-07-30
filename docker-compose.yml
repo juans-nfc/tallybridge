@@ -4,6 +4,7 @@
 #   TB_DATA   host folder for incoming/converted/processed/failed
 #   TB_PORT   host port the UI listens on
 #   TB_PREFIX subpath behind nginx, e.g. /tallybridge
+#   TB_SHARE  host path where the payroll share is mounted
 
 services:
 
@@ -42,4 +43,24 @@ services:
       --failed-dir /data/failed
     volumes:
       - "${TB_DATA:-/srv/tallybridge}:/data"
+    restart: unless-stopped
+
+  # ---- Pulls files off the payroll share -----------------------------------
+  # Same 'auto' profile as the watcher: ./deploy.sh --auto starts both.
+  # Needs the SMB share mounted on the host first (see README).
+  fetcher:
+    build: .
+    image: tallybridge
+    container_name: tallybridge-fetcher
+    profiles: ["auto"]
+    command: >
+      python3 share_fetch.py
+      --source /share
+      --dest /data/incoming
+      --archive /share/processed
+      --state /data/share-fetch-state.json
+      --poll 60
+    volumes:
+      - "${TB_DATA:-/srv/tallybridge}:/data"
+      - "${TB_SHARE:-/mnt/stamper}:/share"
     restart: unless-stopped

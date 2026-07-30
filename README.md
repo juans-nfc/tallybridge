@@ -13,6 +13,7 @@ Runs as two containers off one image:
 |---|---|---|
 | `tallybridge-web` | The page staff convert and check files on | Always |
 | `tallybridge-watcher` | Automatic pickup from the incoming folder | Only with `--auto` |
+| `tallybridge-fetcher` | Copies new files off the payroll share | Only with `--auto` |
 
 The watcher sits behind a compose profile, so a plain deploy starts only the
 UI. Nothing converts unattended until you ask for it.
@@ -64,6 +65,7 @@ TB_DATA=/srv/tallybridge                    # host folder for the data folders
 TB_PORT=8087                                # host port the UI listens on
 TB_PREFIX=/tallybridge                      # subpath behind nginx
 PUBLIC_URL=https://tools.northernfruit.com  # used for the summary and --check
+TB_SHARE=/mnt/stamper                       # where the payroll share is mounted
 TB_AUTH=auto                                # auto | on | off — M365 SSO gate
 ```
 
@@ -164,6 +166,97 @@ docker compose stop watcher
 ```
 
 ---
+
+## Pulling files off the payroll share
+
+The lines write to `\\192.168.1.10\payroll\STAMPER\`. Mount that share on the
+Docker host once, and the `tallybridge-fetcher` container copies new files into
+the incoming folder and moves each source into `STAMPER\processed\` on the share
+so it is never picked up twice.
+
+### 1. Mount the share on the host
+
+```bash
+sudo apt install -y cifs-utils
+sudo mkdir -p /mnt/stamper
+```
+
+Put the credentials in a root-only file so they stay out of `/etc/fstab` and
+out of `ps`:
+
+```bash
+sudo tee /etc/tallybridge-smb.cred >/dev/null <<'EOF'
+username=SERVICEACCOUNT
+password=THEPASSWORD
+domain=NORTHERNFRUIT
+EOF
+sudo chmod 600 /etc/tallybridge-smb.cred
+```
+
+Add the mount to `/etc/fstab` (one line):
+
+```
+//192.168.1.10/payroll/STAMPER  /mnt/stamper  cifs  credentials=/etc/tallybridge-smb.cred,vers=3.0,uid=0,gid=0,file_mode=0660,dir_mode=0770,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=30  0  0
+```
+
+`_netdev` and `nofail` matter: they stop a boot hanging if the file server is
+unreachable. Then mount and confirm:
+
+```bash
+sudo systemctl daemon-reload
+sudo mount -a
+mountpoint /mnt/stamper && ls /mnt/stamper
+```
+
+The service account needs **write** access, since the fetcher moves handled
+files into `processed\`. Read-only also works — files are still converted — but
+each one has to be tidied off the share by hand.
+
+### 2. Start the fetcher
+
+It shares the `auto` profile with the watcher, so:
+
+```bash
+./deploy.sh --auto
+docker compose logs -f fetcher
+```
+
+Expect `Watching share /share for NF-*.txt, IL-*.txt (every 60s)`. Drop a test
+file on the share and it appears in `converted/` about a minute later.
+
+If the share is mounted somewhere other than `/mnt/stamper`, set `TB_SHARE` in
+`.env` and re-run `./deploy.sh --auto`.
+
+### How it avoids double-counting
+
+Duplicate piece counts reaching payroll is the failure worth engineering
+against, so:
+
+- Files are copied under a temporary name and renamed into place, so the
+  converter never sees a partially copied file.
+- A file is only touched once its size has stopped changing — a file still
+  being written by the line is left for the next pass.
+- Every handled file is recorded in `$TB_DATA/share-fetch-state.json` by name,
+  size and modification time. If the archive move fails (read-only share,
+  permissions), the file is **not** copied again; the log says it needs tidying
+  by hand instead.
+- A same-named file that comes back with different content counts as new.
+- An archive name clash keeps both copies (`NF-...-20260730134814.txt`).
+- An unmounted share is reported and retried, never mistaken for "no files".
+
+### Doing it without Docker
+
+If you'd rather run the copy as a plain system job:
+
+```bash
+sudo cp share_fetch.py /usr/local/bin/
+/usr/local/bin/share_fetch.py --source /mnt/stamper --dest /srv/tallybridge/incoming \
+    --archive /mnt/stamper/processed --once
+```
+
+Put that in a cron entry or a systemd timer — `--once` does a single pass and
+exits, so it is safe to run every minute. Two passes can't collide on the same
+file thanks to the state file.
 
 ## Package code translation
 
