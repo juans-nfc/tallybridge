@@ -15,6 +15,8 @@
 #   ./deploy.sh --nginx         print the nginx config to serve it at a subpath
 #   ./deploy.sh --install-nginx install that config into nginx, test, and reload
 #   ./deploy.sh --check         verify the public URL actually answers
+#   ./deploy.sh --smb           print the Samba config for the drop folder
+#   ./deploy.sh --install-smb   install it, test it, restart Samba
 #   ./deploy.sh --help
 #
 set -euo pipefail
@@ -54,6 +56,8 @@ while [ $# -gt 0 ]; do
     --nginx)     ACTION="nginx" ;;
     --install-nginx) ACTION="install-nginx" ;;
     --check)     ACTION="check" ;;
+    --smb)       ACTION="smb" ;;
+    --install-smb) ACTION="install-smb" ;;
     -h|--help)   awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;;
     *)           die "unknown option: $1  (try --help)" ;;
   esac
@@ -61,15 +65,22 @@ while [ $# -gt 0 ]; do
 done
 
 # --- docker available? -----------------------------------------------------
-command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
-if docker compose version >/dev/null 2>&1; then
-  DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  DC="docker-compose"
-else
-  die "docker compose plugin not found (install docker-compose-plugin)"
-fi
-docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon — try sudo, or add your user to the docker group"
+# The config-printing actions don't touch containers, so don't demand docker.
+DC="docker compose"
+case "$ACTION" in
+  nginx|smb|install-smb) ;;
+  *)
+    command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
+    if docker compose version >/dev/null 2>&1; then
+      DC="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+      DC="docker-compose"
+    else
+      die "docker compose plugin not found (install docker-compose-plugin)"
+    fi
+    docker info >/dev/null 2>&1 || die "cannot talk to the docker daemon — try sudo, or add your user to the docker group"
+    ;;
+esac
 
 # --- .env: create on first run, then read it -------------------------------
 if [ ! -f .env ]; then
@@ -148,6 +159,28 @@ ${auth}    proxy_pass         http://127.0.0.1:${TB_PORT}/;
 EOF
 }
 
+SMB_USER="${SMB_USER:-packline}"
+SMB_SHARE="${SMB_SHARE:-incoming}"
+
+# Samba config for the drop folder, printed by --smb, written by --install-smb.
+smb_config() {
+  cat <<EOF
+[${SMB_SHARE}]
+   comment = TallyBridge - drop packing line files here
+   path = ${TB_DATA}/incoming
+   browseable = yes
+   read only = no
+   valid users = ${SMB_USER}
+   force user = root
+   force group = root
+   create mask = 0664
+   directory mask = 0775
+   # Windows scratch files should never look like a packing line export
+   veto files = /.DS_Store/Thumbs.db/desktop.ini/~\$*/
+   delete veto files = yes
+EOF
+}
+
 # Does the public URL answer? Used by --check and after --install-nginx.
 check_public() {
   local url="${PUBLIC_URL%/}${TB_PREFIX}/"
@@ -190,6 +223,65 @@ case "$ACTION" in
       warn "not answering yet — if the container is up, nginx probably isn't"
       warn "proxying this path. Run:  ./deploy.sh --install-nginx"
     fi
+    exit 0 ;;
+
+  smb)
+    printf '# Append to /etc/samba/smb.conf, then: sudo testparm -s && sudo systemctl restart smbd\n'
+    printf '# Or let this script do it:  ./deploy.sh --install-smb\n\n'
+    smb_config
+    exit 0 ;;
+
+  install-smb)
+    say "Setting up the Samba drop folder"
+
+    if ! command -v smbd >/dev/null 2>&1 && ! command -v testparm >/dev/null 2>&1; then
+      warn "Samba isn't installed. Run:  sudo apt install -y samba"
+      exit 1
+    fi
+
+    SUDO=""
+    [ "$(id -u)" != "0" ] && SUDO="sudo"
+    CONF="/etc/samba/smb.conf"
+    [ -f "$CONF" ] || die "$CONF not found — is Samba installed?"
+
+    $SUDO mkdir -p "$TB_DATA/incoming"
+    ok "drop folder exists: $TB_DATA/incoming"
+
+    if grep -qE "^\[${SMB_SHARE}\]" "$CONF"; then
+      ok "[$SMB_SHARE] section already in $CONF — leaving it alone"
+    else
+      BACKUP="${CONF}.tallybridge-backup.$(date +%Y%m%d%H%M%S)"
+      $SUDO cp "$CONF" "$BACKUP"
+      ok "backed up to $BACKUP"
+
+      smb_config | $SUDO tee -a "$CONF" >/dev/null
+      ok "added [$SMB_SHARE] section"
+
+      if ! $SUDO testparm -s >/dev/null 2>&1; then
+        $SUDO cp "$BACKUP" "$CONF"
+        warn "Samba rejected the config — your original file has been restored"
+        $SUDO testparm -s 2>&1 | tail -12 | sed 's/^/      /' || true
+        exit 1
+      fi
+      ok "testparm passed"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+      $SUDO systemctl restart smbd 2>/dev/null || $SUDO systemctl restart smb 2>/dev/null || true
+      ok "Samba restarted"
+    fi
+
+    say "One more step: give the drop user a Samba password"
+    printf '      The share is limited to the user "%s". Create it if needed:\n' "$SMB_USER"
+    printf '        sudo useradd -M -s /usr/sbin/nologin %s     # no home, no shell\n' "$SMB_USER"
+    printf '        sudo smbpasswd -a %s                        # sets the SMB password\n' "$SMB_USER"
+    printf '        sudo smbpasswd -e %s\n\n' "$SMB_USER"
+    printf '      Then from a Windows PC:\n'
+    printf '        \\\\%s\\%s\n' "$(hostname -s 2>/dev/null || hostname)" "$SMB_SHARE"
+    printf '      or map it:  net use S: \\\\%s\\%s /user:%s /persistent:yes\n\n' \
+           "$(hostname -s 2>/dev/null || hostname)" "$SMB_SHARE" "$SMB_USER"
+    printf '      If the server is firewalled, allow SMB from the LAN:\n'
+    printf '        sudo ufw allow from 192.168.1.0/24 to any port 445 proto tcp\n'
     exit 0 ;;
 
   install-nginx)

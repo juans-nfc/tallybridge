@@ -13,7 +13,7 @@ Runs as two containers off one image:
 |---|---|---|
 | `tallybridge-web` | The page staff convert and check files on | Always |
 | `tallybridge-watcher` | Automatic pickup from the incoming folder | Only with `--auto` |
-| `tallybridge-fetcher` | Copies new files off the payroll share | Only with `--auto` |
+| `tallybridge-fetcher` | Copies files off another server's share (Option B only) | Only with `--auto` |
 
 The watcher sits behind a compose profile, so a plain deploy starts only the
 UI. Nothing converts unattended until you ask for it.
@@ -54,6 +54,8 @@ on its port.
 | `./deploy.sh --nginx` | Print the nginx block for the subpath |
 | `./deploy.sh --install-nginx` | Install that block, test it, reload nginx |
 | `./deploy.sh --check` | Confirm the public URL answers |
+| `./deploy.sh --smb` | Print the Samba config for the drop folder |
+| `./deploy.sh --install-smb` | Install it, validate it, restart Samba |
 
 ### Settings — `.env`
 
@@ -167,103 +169,87 @@ docker compose stop watcher
 
 ---
 
-## Pulling files off the payroll share
+## Getting files onto the server
 
-The lines write to `\\192.168.1.10\payroll\STAMPER\`. Mount that share on the
-Docker host once, and the `tallybridge-fetcher` container copies new files into
-the incoming folder and moves each source into `STAMPER\processed\` on the share
-so it is never picked up twice.
+### Option A — users save straight into the drop folder (recommended)
 
-### 1. Mount the share on the host
-
-The share allows guest access, so there are no credentials to store:
+Share `$TB_DATA/incoming` over SMB from this server. Whoever runs the line
+saves the day's file there and it converts on its own — no copy job, no second
+share to keep in sync.
 
 ```bash
-sudo apt install -y cifs-utils
-sudo mkdir -p /mnt/payroll
+sudo apt install -y samba
+./deploy.sh --install-smb
 ```
 
-Add the mount to `/etc/fstab` (one line):
+That appends an `[incoming]` share to `/etc/samba/smb.conf` (backing the file
+up first, validating with `testparm`, and restoring the backup if Samba
+objects), then restarts Samba. Re-running is a no-op if the section is already
+there. `./deploy.sh --smb` prints the config without installing it.
 
-```
-//192.168.1.10/payroll  /mnt/payroll  cifs  guest,vers=3.0,uid=0,gid=0,file_mode=0660,dir_mode=0770,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=30  0  0
-```
-
-`_netdev` and `nofail` matter: they stop a boot hanging if the file server is
-unreachable. Then mount and confirm:
+Then create the account the share is limited to:
 
 ```bash
-sudo systemctl daemon-reload
-sudo mount -a
-mountpoint /mnt/payroll && ls /mnt/payroll/STAMPER
+sudo useradd -M -s /usr/sbin/nologin packline   # no home directory, no shell
+sudo smbpasswd -a packline                      # set the SMB password
+sudo smbpasswd -e packline
 ```
 
-If the mount is rejected, the SMB version is usually the cause — try
-`vers=2.1`, or `vers=1.0,sec=none` for an older file server. `dmesg | tail`
-names the reason.
-
-Note this mounts the whole `payroll` share and points TallyBridge at the
-`STAMPER` subfolder, which is more portable than mounting the subfolder
-directly. Set it in `.env`:
+From a Windows PC:
 
 ```
-TB_SHARE=/mnt/payroll/STAMPER
+\\tools\incoming
 ```
 
-Guest access needs to include **write** permission, since the fetcher moves
-handled files into `STAMPER\processed\`. Read-only also works — files are still
-converted — but each one then has to be cleared off the share by hand, and the
-log will say so. Check with:
+or map it permanently:
+
+```
+net use S: \\tools\incoming /user:packline /persistent:yes
+```
+
+If the server is firewalled, allow SMB from the plant LAN only:
 
 ```bash
-touch /mnt/payroll/STAMPER/.writetest && rm /mnt/payroll/STAMPER/.writetest && echo writable
+sudo ufw allow from 192.168.1.0/24 to any port 445 proto tcp
 ```
 
-### 2. Start the fetcher
+Notes worth knowing:
 
-It shares the `auto` profile with the watcher, so:
+- **`force user = root`** in the share config means files land owned by root,
+  which is what the containers run as — so the watcher can always read a file
+  and move it into `processed/`. Without it a file saved by one user could be
+  unmovable.
+- **Files vanish from the users' view** a few seconds after saving. That's the
+  watcher archiving the source into `processed/`, not a lost file. Tell whoever
+  uses the share, or they will re-save it.
+- **Re-saving the same filename converts it again**, overwriting the workbook.
+  Harmless in itself, but don't import the same day into Paycom twice.
+- Windows scratch files (`Thumbs.db`, `desktop.ini`, `~$...`) are both vetoed by
+  Samba and ignored by the watcher, which only picks up `NF-*.txt` / `IL-*.txt`.
+- To use a different share name or account, set `SMB_SHARE` / `SMB_USER` before
+  running: `SMB_USER=nfline ./deploy.sh --install-smb`.
+
+### Option B — pull from an existing share
+
+If the files already land on another server's share, `share_fetch.py` can copy
+them across instead: mount that share on this host, set `TB_SHARE` in `.env` to
+the folder the lines write into, and `./deploy.sh --auto` starts a
+`tallybridge-fetcher` container alongside the watcher. It copies new
+`NF-*.txt` / `IL-*.txt` into the incoming folder and moves each source into a
+`processed` subfolder on the share, keeping a state file
+(`$TB_DATA/share-fetch-state.json`) so nothing is ever copied — or counted —
+twice.
+
+The script also runs standalone for cron or a systemd timer:
 
 ```bash
-./deploy.sh --auto
-docker compose logs -f fetcher
+./share_fetch.py --source /mnt/somewhere --dest /srv/tallybridge/incoming \
+    --archive /mnt/somewhere/processed --once
 ```
 
-Expect `Watching share /share for NF-*.txt, IL-*.txt (every 60s)`. Drop a test
-file on the share and it appears in `converted/` about a minute later.
-
-If the share is mounted elsewhere, set `TB_SHARE` in `.env` to the folder the
-lines write into, then re-run `./deploy.sh --auto`.
-
-### How it avoids double-counting
-
-Duplicate piece counts reaching payroll is the failure worth engineering
-against, so:
-
-- Files are copied under a temporary name and renamed into place, so the
-  converter never sees a partially copied file.
-- A file is only touched once its size has stopped changing — a file still
-  being written by the line is left for the next pass.
-- Every handled file is recorded in `$TB_DATA/share-fetch-state.json` by name,
-  size and modification time. If the archive move fails (read-only share,
-  permissions), the file is **not** copied again; the log says it needs tidying
-  by hand instead.
-- A same-named file that comes back with different content counts as new.
-- An archive name clash keeps both copies (`NF-...-20260730134814.txt`).
-- An unmounted share is reported and retried, never mistaken for "no files".
-
-### Doing it without Docker
-
-If you'd rather run the copy as a plain system job:
-
-```bash
-sudo cp share_fetch.py /usr/local/bin/
-/usr/local/bin/share_fetch.py --source /mnt/stamper --dest /srv/tallybridge/incoming \
-    --archive /mnt/stamper/processed --once
-```
-
-Put that in a cron entry or a systemd timer — `--once` does a single pass and
-exits, so it is safe to run every minute. Two passes can't collide on the same
-file thanks to the state file.
+Mounting an IBM i (AS/400) NetServer share needs `vers=2.0` — its NetServer
+tops out at SMB dialect 2.002 — and a real user profile, since guest is
+refused. Option A avoids all of that.
 
 ## Package code translation
 
