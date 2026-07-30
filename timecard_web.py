@@ -341,50 +341,62 @@ INDEX_PAGE = """
     <h2>Converted files</h2>
     {% if recent %}
     <form method="post" action="{{ url_for('delete_files') }}" id="cleanup"
-          onsubmit="return confirmDelete()">
+>
     <table>
       <tr>
-        <th class="pick"><input type="checkbox" id="all" onclick="toggleAll(this)"
-              aria-label="Select all files"></th>
+        <th class="pick"><input type="checkbox" id="all" aria-label="Select all files"></th>
         <th>File</th><th>Created</th><th class="num">Size</th><th></th></tr>
       {% for f in recent %}
       <tr><td class="pick"><input type="checkbox" name="files" value="{{ f.name }}"
-              onclick="countPicked()" aria-label="Select {{ f.name }}"></td>
+              aria-label="Select {{ f.name }}"></td>
         <td>{{ f.name }}</td><td>{{ f.when }}</td><td class="num">{{ f.size }}</td>
         <td><a class="dl" href="{{ url_for('download', filename=f.name) }}">Download</a></td></tr>
       {% endfor %}
     </table>
     <div class="row">
-      <button type="submit" class="danger" id="delbtn" disabled>Delete selected</button>
+      <button type="submit" class="danger" id="delbtn">Delete selected</button>
       <span class="hint" id="delhint">Tick the files you've already imported.</span>
     </div>
     </form>
     <script>
-      function picked() {
-        return Array.from(document.querySelectorAll('input[name=files]'))
-                    .filter(function (c) { return c.checked; });
-      }
-      function countPicked() {
-        var n = picked().length;
+      (function () {
+        var boxes = function () {
+          return Array.prototype.slice.call(
+            document.querySelectorAll('input[name=files]'));
+        };
+        var picked = function () {
+          return boxes().filter(function (c) { return c.checked; });
+        };
         var btn = document.getElementById('delbtn');
-        btn.disabled = n === 0;
-        btn.textContent = n ? 'Delete ' + n + ' selected' : 'Delete selected';
-        document.getElementById('delhint').textContent = n
-          ? 'This removes them from the server for good.'
-          : "Tick the files you've already imported.";
-      }
-      function toggleAll(box) {
-        document.querySelectorAll('input[name=files]').forEach(function (c) {
-          c.checked = box.checked;
+        var hint = document.getElementById('delhint');
+
+        var refresh = function () {
+          var n = picked().length;
+          btn.disabled = n === 0;
+          btn.textContent = n ? 'Delete ' + n + ' selected' : 'Delete selected';
+          hint.textContent = n
+            ? 'This removes them from the server for good.'
+            : 'Tick the files you have already imported.';
+        };
+
+        boxes().forEach(function (c) { c.addEventListener('change', refresh); });
+
+        var all = document.getElementById('all');
+        all.addEventListener('change', function () {
+          boxes().forEach(function (c) { c.checked = all.checked; });
+          refresh();
         });
-        countPicked();
-      }
-      function confirmDelete() {
-        var names = picked().map(function (c) { return c.value; });
-        if (!names.length) { return false; }
-        return confirm('Delete ' + names.length + ' file(s)?\n\n' + names.join('\n') +
-                       '\n\nThis cannot be undone.');
-      }
+
+        document.getElementById('cleanup').addEventListener('submit', function (e) {
+          var names = picked().map(function (c) { return c.value; });
+          if (!names.length) { e.preventDefault(); return; }
+          var msg = 'Delete ' + names.length + ' file(s)? This cannot be undone. '
+                  + names.join(', ');
+          if (!window.confirm(msg)) { e.preventDefault(); }
+        });
+
+        refresh();
+      })();
     </script>
     {% else %}
       <p class="empty">Nothing converted yet. Saved workbooks show up here to download.</p>
