@@ -62,5 +62,5 @@ services:
       --poll 60
     volumes:
       - "${TB_DATA:-/srv/tallybridge}:/data"
-      - "${TB_SHARE:-/mnt/stamper}:/share"
+      - "${TB_SHARE:-/mnt/payroll/STAMPER}:/share"
     restart: unless-stopped

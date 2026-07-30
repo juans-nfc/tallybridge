@@ -65,7 +65,7 @@ TB_DATA=/srv/tallybridge                    # host folder for the data folders
 TB_PORT=8087                                # host port the UI listens on
 TB_PREFIX=/tallybridge                      # subpath behind nginx
 PUBLIC_URL=https://tools.northernfruit.com  # used for the summary and --check
-TB_SHARE=/mnt/stamper                       # where the payroll share is mounted
+TB_SHARE=/mnt/payroll/STAMPER               # the STAMPER folder on the mounted share
 TB_AUTH=auto                                # auto | on | off — M365 SSO gate
 ```
 
@@ -176,27 +176,17 @@ so it is never picked up twice.
 
 ### 1. Mount the share on the host
 
+The share allows guest access, so there are no credentials to store:
+
 ```bash
 sudo apt install -y cifs-utils
-sudo mkdir -p /mnt/stamper
-```
-
-Put the credentials in a root-only file so they stay out of `/etc/fstab` and
-out of `ps`:
-
-```bash
-sudo tee /etc/tallybridge-smb.cred >/dev/null <<'EOF'
-username=SERVICEACCOUNT
-password=THEPASSWORD
-domain=NORTHERNFRUIT
-EOF
-sudo chmod 600 /etc/tallybridge-smb.cred
+sudo mkdir -p /mnt/payroll
 ```
 
 Add the mount to `/etc/fstab` (one line):
 
 ```
-//192.168.1.10/payroll/STAMPER  /mnt/stamper  cifs  credentials=/etc/tallybridge-smb.cred,vers=3.0,uid=0,gid=0,file_mode=0660,dir_mode=0770,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=30  0  0
+//192.168.1.10/payroll  /mnt/payroll  cifs  guest,vers=3.0,uid=0,gid=0,file_mode=0660,dir_mode=0770,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=30  0  0
 ```
 
 `_netdev` and `nofail` matter: they stop a boot hanging if the file server is
@@ -205,12 +195,29 @@ unreachable. Then mount and confirm:
 ```bash
 sudo systemctl daemon-reload
 sudo mount -a
-mountpoint /mnt/stamper && ls /mnt/stamper
+mountpoint /mnt/payroll && ls /mnt/payroll/STAMPER
 ```
 
-The service account needs **write** access, since the fetcher moves handled
-files into `processed\`. Read-only also works — files are still converted — but
-each one has to be tidied off the share by hand.
+If the mount is rejected, the SMB version is usually the cause — try
+`vers=2.1`, or `vers=1.0,sec=none` for an older file server. `dmesg | tail`
+names the reason.
+
+Note this mounts the whole `payroll` share and points TallyBridge at the
+`STAMPER` subfolder, which is more portable than mounting the subfolder
+directly. Set it in `.env`:
+
+```
+TB_SHARE=/mnt/payroll/STAMPER
+```
+
+Guest access needs to include **write** permission, since the fetcher moves
+handled files into `STAMPER\processed\`. Read-only also works — files are still
+converted — but each one then has to be cleared off the share by hand, and the
+log will say so. Check with:
+
+```bash
+touch /mnt/payroll/STAMPER/.writetest && rm /mnt/payroll/STAMPER/.writetest && echo writable
+```
 
 ### 2. Start the fetcher
 
@@ -224,8 +231,8 @@ docker compose logs -f fetcher
 Expect `Watching share /share for NF-*.txt, IL-*.txt (every 60s)`. Drop a test
 file on the share and it appears in `converted/` about a minute later.
 
-If the share is mounted somewhere other than `/mnt/stamper`, set `TB_SHARE` in
-`.env` and re-run `./deploy.sh --auto`.
+If the share is mounted elsewhere, set `TB_SHARE` in `.env` to the folder the
+lines write into, then re-run `./deploy.sh --auto`.
 
 ### How it avoids double-counting
 

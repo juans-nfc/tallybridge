@@ -24,7 +24,7 @@ TB_DATA_DEFAULT="/srv/tallybridge"
 TB_PORT_DEFAULT="8087"
 TB_PREFIX_DEFAULT="/tallybridge"
 PUBLIC_URL_DEFAULT="https://tools.northernfruit.com"
-TB_SHARE_DEFAULT="/mnt/stamper"
+TB_SHARE_DEFAULT="/mnt/payroll/STAMPER"
 TB_AUTH_DEFAULT="auto"     # auto | on | off — gate behind M365 SSO (oauth2-proxy)
 
 APP="TallyBridge"
@@ -366,14 +366,30 @@ if [ "$DO_BUILD" = "1" ]; then
 fi
 
 if [ "$WITH_AUTO" = "1" ]; then
-  if mountpoint -q "$TB_SHARE" 2>/dev/null; then
-    ok "payroll share mounted at $TB_SHARE"
-  elif [ -d "$TB_SHARE" ]; then
-    warn "$TB_SHARE exists but is not a mount point — the fetcher will report"
-    warn "the share as unavailable until it's mounted (see README)"
-  else
+  # TB_SHARE is usually a folder INSIDE the mount (e.g. /mnt/payroll/STAMPER),
+  # so ask what filesystem it sits on rather than whether it is itself a mount.
+  if [ ! -d "$TB_SHARE" ]; then
     warn "$TB_SHARE does not exist — the fetcher will idle until the share is"
-    warn "mounted there. Set TB_SHARE in .env if it lives elsewhere."
+    warn "mounted. Set TB_SHARE in .env if it lives elsewhere."
+  else
+    FSTYPE=""
+    if command -v findmnt >/dev/null 2>&1; then
+      FSTYPE="$(findmnt -n -o FSTYPE -T "$TB_SHARE" 2>/dev/null || true)"
+    elif command -v stat >/dev/null 2>&1; then
+      FSTYPE="$(stat -f -c %T "$TB_SHARE" 2>/dev/null || true)"
+    fi
+    case "$FSTYPE" in
+      cifs|smb*|nfs*)  ok "payroll share mounted ($FSTYPE) at $TB_SHARE" ;;
+      "")              warn "could not determine what $TB_SHARE sits on — check the mount" ;;
+      *)               warn "$TB_SHARE is on a local filesystem ($FSTYPE), not the payroll"
+                       warn "share — the fetcher will read an empty folder. Check 'mount -a'." ;;
+    esac
+    if [ -w "$TB_SHARE" ]; then
+      ok "share is writable (handled files can be archived)"
+    else
+      warn "share is not writable — files will still convert, but each one must"
+      warn "be cleared off the share by hand"
+    fi
   fi
 fi
 
