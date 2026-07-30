@@ -33,6 +33,7 @@ import csv
 import shutil
 import sys
 import time
+from datetime import date
 from pathlib import Path
 from typing import NamedTuple
 
@@ -78,7 +79,8 @@ class Row(NamedTuple):
     """One line of a packing-line file, ready for the import template."""
     emp_id: str          # column A — zero-padded to EMP_ID_WIDTH for Paycom
     emp_id_raw: str      # the badge number exactly as SIMS wrote it
-    date_code: str       # column C
+    date_code: str       # column C — MM/DD/YYYY for Paycom
+    date_code_raw: str   # the batch code exactly as SIMS wrote it
     sims_code: str       # source code, kept for display and troubleshooting
     paycom_code: str     # column F — what payroll actually receives
     description: str     # Paycom description, for the preview screen
@@ -93,6 +95,11 @@ class Row(NamedTuple):
     def assigned(self) -> bool:
         """False for rows the line wrote with no packer ID in them."""
         return bool(self.emp_id)
+
+    @property
+    def date_ok(self) -> bool:
+        """True when the batch code yielded a real calendar date."""
+        return self.date_code != self.date_code_raw
 
     @property
     def padded(self) -> bool:
@@ -148,6 +155,31 @@ def normalize_emp_id(raw: str) -> str:
     if not emp or not emp.isdigit():
         return emp
     return emp.zfill(EMP_ID_WIDTH)
+
+
+# The line writes the pack date as the first 6 digits of the batch code
+# (MMDDYY), followed by line/plant characters such as "1P1" that payroll
+# doesn't want: 0720261P1 -> 07/20/2026.
+DATE_CODE_DIGITS = 6
+
+
+def normalize_date(raw: str):
+    """Turn a SIMS batch code into the MM/DD/YYYY Paycom expects.
+
+    Returns (value, recognised). Anything that isn't a valid MMDDYY date is
+    passed through untouched and flagged, rather than guessed at — a wrong
+    date on a timecard is worse than an obvious one.
+    """
+    code = raw.strip()
+    head = code[:DATE_CODE_DIGITS]
+    if len(head) == DATE_CODE_DIGITS and head.isdigit():
+        mm, dd, yy = head[:2], head[2:4], head[4:6]
+        try:
+            when = date(2000 + int(yy), int(mm), int(dd))
+        except ValueError:
+            return code, False
+        return f"{when.month:02d}/{when.day:02d}/{when.year}", True
+    return code, False
 
 
 # Expected field widths, used only to work out which column is missing when a
@@ -226,6 +258,7 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
             continue  # nothing usable on this line
 
         paycom_code, description = translate_code(sims_code)
+        pack_date, _date_ok = normalize_date(date_code)
 
         # Labor Allocation Code is stored as a number (matches the sample
         # payroll prepared); fall back to text if it's ever non-numeric.
@@ -234,7 +267,8 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
         rows.append(Row(
             emp_id=normalize_emp_id(emp_id),
             emp_id_raw=emp_id.strip(),
-            date_code=date_code,
+            date_code=pack_date,
+            date_code_raw=date_code.strip(),
             sims_code=sims_code,
             paycom_code=paycom_code,
             description=description,

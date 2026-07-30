@@ -294,6 +294,13 @@ The lines produce two shapes and TallyBridge detects which it's handed:
   endings. Field boundaries are worked out from the file itself (any column
   blank on every row is a separator), so a change in padding doesn't break it.
 
+**The batch code becomes the pack date.** Its first six digits are MMDDYY, so
+`0720261P1` is written as `07/20/2026`; the trailing line/plant characters
+(`1P1`) are dropped. A code that doesn't start with a valid calendar date is
+passed through unchanged and flagged on the preview rather than guessed at. If
+the file name carries a date too (`NF-Y2026M07D20`) and it disagrees with the
+rows, the preview says so — usually a sign the wrong day's file was picked up.
+
 **Badge numbers are zero-padded to 7 digits** on the way out, because that is
 the width Paycom expects: SIMS writes `0303`, the workbook carries `0000303`.
 A badge that is already 7 digits is left alone; one that is longer, or not
@@ -311,7 +318,7 @@ a house employee number, that's a small change to `convert()`.
 
 | Source .txt field | Template column |
 |---|---|
-| 1 — date/batch code (`0205261P1`) | C — Date |
+| 1 — batch code (`0720261P1`) | C — Date, **converted to MM/DD/YYYY** (`07/20/2026`) |
 | 2 — line number | *(not imported)* |
 | 3 — packer ID (`0303`) | A — Employee ID, **zero-padded to 7 digits** (`0000303`) |
 | 4 — SIMS package code (`510`) | F — Earning Code, **translated to Paycom** (`T10`) |

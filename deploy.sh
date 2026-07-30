@@ -106,6 +106,17 @@ TB_PREFIX="${TB_PREFIX:-$TB_PREFIX_DEFAULT}"
 PUBLIC_URL="${PUBLIC_URL:-$PUBLIC_URL_DEFAULT}"
 TB_AUTH="${TB_AUTH:-$TB_AUTH_DEFAULT}"
 TB_SHARE="${TB_SHARE:-$TB_SHARE_DEFAULT}"
+# If the watcher/fetcher are already running, keep them in scope for this
+# deploy. Without this a rebuild recreates only the web container and the
+# watcher silently keeps running the OLD image.
+if [ "$WITH_AUTO" != "1" ] && command -v docker >/dev/null 2>&1; then
+  if docker ps --format '{{.Names}}' 2>/dev/null \
+       | grep -qE '^tallybridge-(watcher|fetcher)$'; then
+    WITH_AUTO=1
+    AUTO_INHERITED=1
+  fi
+fi
+
 PROFILE_ARGS=()
 [ "$WITH_AUTO" = "1" ] && PROFILE_ARGS=(--profile auto)
 
@@ -524,7 +535,12 @@ if [ "$WITH_AUTO" = "1" ]; then
 fi
 
 say "Starting containers"
-$DC "${PROFILE_ARGS[@]}" up -d --remove-orphans
+if [ "${AUTO_INHERITED:-0}" = "1" ]; then
+  ok "watcher/fetcher already running — including them so they pick up this build"
+fi
+RECREATE=""
+[ "$DO_BUILD" = "1" ] && RECREATE="--force-recreate"
+$DC "${PROFILE_ARGS[@]}" up -d --remove-orphans $RECREATE
 if [ "$WITH_AUTO" = "1" ]; then
   ok "UI, folder watcher and share fetcher running"
 else
@@ -545,6 +561,23 @@ if [ "$CODE" = "200" ]; then
 else
   warn "no 200 from $URL yet (got '${CODE:-no response}')"
   warn "check the log:  $DC logs web"
+fi
+
+# --- confirm the containers are on the new build ---------------------------
+if [ "$DO_BUILD" = "1" ]; then
+  say "Verifying containers are running the current code"
+  for c in tallybridge-web tallybridge-watcher tallybridge-fetcher; do
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${c}$"; then
+      BUILT="$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null | cut -c1-19)"
+      CURRENT="$(docker image inspect -f '{{.Id}}' tallybridge 2>/dev/null | cut -c1-19)"
+      if [ -n "$BUILT" ] && [ "$BUILT" = "$CURRENT" ]; then
+        ok "$c is on the current image"
+      else
+        warn "$c is running an OLDER image — recreate it with:"
+        warn "  $DC --profile auto up -d --force-recreate"
+      fi
+    fi
+  done
 fi
 
 # --- summary ---------------------------------------------------------------

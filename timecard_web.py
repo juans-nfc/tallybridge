@@ -19,6 +19,7 @@ Intended for a trusted internal network only — there is no login.
 
 import argparse
 import os
+import re
 import shutil
 import time
 import uuid
@@ -146,6 +147,22 @@ def summarize(all_rows, source_name):
             "those rows keep the SIMS code and payroll will likely reject them. "
             "Add the code to PACKAGE_CODES in timecard_converter.py.")
 
+    unreadable = sorted({r.date_code_raw for r in rows if not r.date_ok})
+    if unreadable:
+        notes.append(
+            f"Batch code(s) {', '.join(unreadable)} don't start with a valid "
+            f"MMDDYY date — they go to Paycom unchanged rather than being guessed at.")
+
+    # The file name carries the pack date too; disagreement usually means the
+    # wrong day's file was picked up.
+    stamped = re.search(r"Y(\d{4})M(\d{2})D(\d{2})", source_name)
+    if stamped and date_codes:
+        from_name = f"{stamped.group(2)}/{stamped.group(3)}/{stamped.group(1)}"
+        if from_name not in date_codes:
+            notes.append(
+                f"The file name says {from_name} but the rows are dated "
+                f"{', '.join(date_codes)} — check this is the file you meant.")
+
     odd = sorted({r.emp_id_raw for r in rows if r.odd_badge})
     if odd:
         notes.append(
@@ -200,10 +217,12 @@ def summarize(all_rows, source_name):
     ]
 
     pad_example = next(((r.emp_id_raw, r.emp_id) for r in rows if r.padded), None)
+    date_example = next(((r.date_code_raw, r.date_code) for r in rows if r.date_ok), None)
 
     return {
         "source": source_name,
         "pad_example": pad_example,
+        "date_example": date_example,
         "row_count": len(rows),
         "orphan_count": len(orphans),
         "orphan_units": orphan_units,
@@ -472,7 +491,7 @@ PREVIEW_PAGE = """
       <div class="v">{{ s.row_count }}</div>
       {% if s.orphan_count %}<div class="sub">{{ s.orphan_count }} skipped, no packer ID</div>{% endif %}</div>
     <div class="stat"><div class="k">Packers</div><div class="v">{{ s.packer_count }}</div></div>
-    <div class="stat"><div class="k">Date code</div>
+    <div class="stat"><div class="k">Pack date</div>
       <div class="v" style="font-size:18px">{{ s.date_codes | join(', ') }}</div></div>
     <div class="stat"><div class="k">Pieces ({{ s.piece_label }})</div>
       <div class="v">{{ "{:,}".format(s.piece_total) }}</div></div>
@@ -540,7 +559,9 @@ PREVIEW_PAGE = """
       {% endfor %}
     </table></div>
     <p class="hint">Employee ID is zero-padded to {{ emp_width }} digits for Paycom{% if s.pad_example %}
-       (badge {{ s.pad_example[0] }} becomes {{ s.pad_example[1] }}){% endif %}.
+       (badge {{ s.pad_example[0] }} becomes {{ s.pad_example[1] }}){% endif %}, and the
+       batch code becomes the pack date{% if s.date_example %}
+       ({{ s.date_example[0] }} becomes {{ s.date_example[1] }}){% endif %}.
        {% if truncated %}Showing the first {{ rows | length }} of {{ s.row_count }} rows;
        all {{ s.row_count }} are saved.{% endif %}</p>
 
