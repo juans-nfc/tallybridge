@@ -171,40 +171,40 @@ docker compose stop watcher
 
 ## Getting files onto the server
 
-### Option A — users save straight into the drop folder (recommended)
+### Option A — Windows shares on this server (recommended)
 
-Share `$TB_DATA/incoming` over SMB from this server. Whoever runs the line
-saves the day's file there and it converts on its own — no copy job, no second
-share to keep in sync.
+Two SMB shares, both password protected:
+
+| Share | Folder | Access | Who |
+|---|---|---|---|
+| `\\tools\incoming` | `$TB_DATA/incoming` | read/write | the line — drops the day's `.txt` |
+| `\\tools\converted` | `$TB_DATA/converted` | **read only** | payroll — imports the workbooks |
 
 ```bash
 sudo apt install -y samba
 ./deploy.sh --install-smb
 ```
 
-That appends an `[incoming]` share to `/etc/samba/smb.conf` (backing the file
-up first, validating with `testparm`, and restoring the backup if Samba
-objects), then restarts Samba. Re-running is a no-op if the section is already
-there. `./deploy.sh --smb` prints the config without installing it.
+That appends whichever sections are missing to `/etc/samba/smb.conf` — backing
+the file up first, validating with `testparm`, restoring the backup if Samba
+objects — then restarts Samba. Re-running is a no-op. `./deploy.sh --smb`
+prints the config without installing it.
 
-Then create the account the share is limited to:
+Then create the two accounts (the script tells you which already exist):
 
 ```bash
 sudo useradd -M -s /usr/sbin/nologin packline   # no home directory, no shell
-sudo smbpasswd -a packline                      # set the SMB password
-sudo smbpasswd -e packline
+sudo smbpasswd -a packline && sudo smbpasswd -e packline
+
+sudo useradd -M -s /usr/sbin/nologin payroll
+sudo smbpasswd -a payroll && sudo smbpasswd -e payroll
 ```
 
-From a Windows PC:
+Map them from Windows:
 
 ```
-\\tools\incoming
-```
-
-or map it permanently:
-
-```
-net use S: \\tools\incoming /user:packline /persistent:yes
+net use S: \\tools\incoming  /user:packline /persistent:yes
+net use P: \\tools\converted /user:payroll  /persistent:yes
 ```
 
 If the server is firewalled, allow SMB from the plant LAN only:
@@ -215,19 +215,23 @@ sudo ufw allow from 192.168.1.0/24 to any port 445 proto tcp
 
 Notes worth knowing:
 
-- **`force user = root`** in the share config means files land owned by root,
-  which is what the containers run as — so the watcher can always read a file
-  and move it into `processed/`. Without it a file saved by one user could be
-  unmovable.
-- **Files vanish from the users' view** a few seconds after saving. That's the
+- **`converted` is deliberately read only.** Paycom only needs to read the
+  workbooks, and a read-only share means an import can't move, lock, or delete
+  one by accident. Removing files after import is done from the web page, which
+  logs who did it.
+- **`force user = root`** means files land owned by root, which is what the
+  containers run as — so the watcher can always read a dropped file and move it
+  into `processed/`. Without it a file saved by one user could be unmovable.
+- **Files vanish from `incoming` a few seconds after saving.** That's the
   watcher archiving the source into `processed/`, not a lost file. Tell whoever
-  uses the share, or they will re-save it.
+  uses the share, or they will save it twice.
 - **Re-saving the same filename converts it again**, overwriting the workbook.
-  Harmless in itself, but don't import the same day into Paycom twice.
-- Windows scratch files (`Thumbs.db`, `desktop.ini`, `~$...`) are both vetoed by
-  Samba and ignored by the watcher, which only picks up `NF-*.txt` / `IL-*.txt`.
-- To use a different share name or account, set `SMB_SHARE` / `SMB_USER` before
-  running: `SMB_USER=nfline ./deploy.sh --install-smb`.
+  Harmless in itself — just don't import the same day into Paycom twice.
+- Windows scratch files (`Thumbs.db`, `desktop.ini`, `~$...`) are vetoed by
+  Samba and ignored by the watcher, which only takes `NF-*.txt` / `IL-*.txt`.
+- Names and accounts are overridable:
+  `SMB_USER=nfline SMB_USER_OUT=hr SMB_SHARE_OUT=workbooks ./deploy.sh --install-smb`.
+  One account can serve both — set `SMB_USER_OUT` to the same name.
 
 ### Option B — pull from an existing share
 

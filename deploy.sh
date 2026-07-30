@@ -159,12 +159,15 @@ ${auth}    proxy_pass         http://127.0.0.1:${TB_PORT}/;
 EOF
 }
 
-SMB_USER="${SMB_USER:-packline}"
+SMB_USER="${SMB_USER:-packline}"          # writes source files into incoming
+SMB_USER_OUT="${SMB_USER_OUT:-payroll}"   # reads finished workbooks (may be the same)
 SMB_SHARE="${SMB_SHARE:-incoming}"
+SMB_SHARE_OUT="${SMB_SHARE_OUT:-converted}"
 
-# Samba config for the drop folder, printed by --smb, written by --install-smb.
-smb_config() {
+# Samba config for the drop folder — writable by the line.
+smb_config_incoming() {
   cat <<EOF
+
 [${SMB_SHARE}]
    comment = TallyBridge - drop packing line files here
    path = ${TB_DATA}/incoming
@@ -180,6 +183,24 @@ smb_config() {
    delete veto files = yes
 EOF
 }
+
+# Samba config for finished workbooks — read only, so an import can't alter or
+# delete them by accident. Removing them is done from the web page.
+smb_config_converted() {
+  cat <<EOF
+
+[${SMB_SHARE_OUT}]
+   comment = TallyBridge - finished workbooks for Paycom (read only)
+   path = ${TB_DATA}/converted
+   browseable = yes
+   read only = yes
+   valid users = ${SMB_USER} ${SMB_USER_OUT}
+   force user = root
+   force group = root
+EOF
+}
+
+smb_config() { smb_config_incoming; smb_config_converted; }
 
 # Does the public URL answer? Used by --check and after --install-nginx.
 check_public() {
@@ -232,7 +253,7 @@ case "$ACTION" in
     exit 0 ;;
 
   install-smb)
-    say "Setting up the Samba drop folder"
+    say "Setting up the Samba shares"
 
     if ! command -v smbd >/dev/null 2>&1 && ! command -v testparm >/dev/null 2>&1; then
       warn "Samba isn't installed. Run:  sudo apt install -y samba"
@@ -244,18 +265,28 @@ case "$ACTION" in
     CONF="/etc/samba/smb.conf"
     [ -f "$CONF" ] || die "$CONF not found — is Samba installed?"
 
-    $SUDO mkdir -p "$TB_DATA/incoming"
-    ok "drop folder exists: $TB_DATA/incoming"
+    $SUDO mkdir -p "$TB_DATA/incoming" "$TB_DATA/converted"
+    ok "folders exist: $TB_DATA/{incoming,converted}"
 
-    if grep -qE "^\[${SMB_SHARE}\]" "$CONF"; then
-      ok "[$SMB_SHARE] section already in $CONF — leaving it alone"
+    NEEDED=""
+    grep -qE "^\[${SMB_SHARE}\]" "$CONF"     || NEEDED="$NEEDED $SMB_SHARE"
+    grep -qE "^\[${SMB_SHARE_OUT}\]" "$CONF" || NEEDED="$NEEDED $SMB_SHARE_OUT"
+
+    if [ -z "$NEEDED" ]; then
+      ok "[$SMB_SHARE] and [$SMB_SHARE_OUT] already in $CONF — leaving them alone"
     else
       BACKUP="${CONF}.tallybridge-backup.$(date +%Y%m%d%H%M%S)"
       $SUDO cp "$CONF" "$BACKUP"
       ok "backed up to $BACKUP"
 
-      smb_config | $SUDO tee -a "$CONF" >/dev/null
-      ok "added [$SMB_SHARE] section"
+      for share in $NEEDED; do
+        if [ "$share" = "$SMB_SHARE" ]; then
+          smb_config_incoming | $SUDO tee -a "$CONF" >/dev/null
+        else
+          smb_config_converted | $SUDO tee -a "$CONF" >/dev/null
+        fi
+        ok "added [$share]"
+      done
 
       if ! $SUDO testparm -s >/dev/null 2>&1; then
         $SUDO cp "$BACKUP" "$CONF"
@@ -271,15 +302,22 @@ case "$ACTION" in
       ok "Samba restarted"
     fi
 
-    say "One more step: give the drop user a Samba password"
-    printf '      The share is limited to the user "%s". Create it if needed:\n' "$SMB_USER"
-    printf '        sudo useradd -M -s /usr/sbin/nologin %s     # no home, no shell\n' "$SMB_USER"
-    printf '        sudo smbpasswd -a %s                        # sets the SMB password\n' "$SMB_USER"
-    printf '        sudo smbpasswd -e %s\n\n' "$SMB_USER"
-    printf '      Then from a Windows PC:\n'
-    printf '        \\\\%s\\%s\n' "$(hostname -s 2>/dev/null || hostname)" "$SMB_SHARE"
-    printf '      or map it:  net use S: \\\\%s\\%s /user:%s /persistent:yes\n\n' \
-           "$(hostname -s 2>/dev/null || hostname)" "$SMB_SHARE" "$SMB_USER"
+    HOSTSHORT="$(hostname -s 2>/dev/null || hostname)"
+    say "Accounts"
+    printf '      %-9s writes files into  \\\\%s\\%s\n' "$SMB_USER" "$HOSTSHORT" "$SMB_SHARE"
+    printf '      %-9s reads workbooks at \\\\%s\\%s  (read only)\n\n' \
+           "$SMB_USER_OUT" "$HOSTSHORT" "$SMB_SHARE_OUT"
+    printf '      Create either one that does not exist yet:\n'
+    for u in "$SMB_USER" "$SMB_USER_OUT"; do
+      if id "$u" >/dev/null 2>&1; then
+        printf '        %-9s exists — set its SMB password with: sudo smbpasswd -a %s\n' "$u" "$u"
+      else
+        printf '        sudo useradd -M -s /usr/sbin/nologin %s && sudo smbpasswd -a %s && sudo smbpasswd -e %s\n' "$u" "$u" "$u"
+      fi
+    done
+    printf '\n      Map from Windows:\n'
+    printf '        net use S: \\\\%s\\%s /user:%s /persistent:yes\n' "$HOSTSHORT" "$SMB_SHARE" "$SMB_USER"
+    printf '        net use P: \\\\%s\\%s /user:%s /persistent:yes\n\n' "$HOSTSHORT" "$SMB_SHARE_OUT" "$SMB_USER_OUT"
     printf '      If the server is firewalled, allow SMB from the LAN:\n'
     printf '        sudo ufw allow from 192.168.1.0/24 to any port 445 proto tcp\n'
     exit 0 ;;
