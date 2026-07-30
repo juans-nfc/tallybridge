@@ -131,6 +131,11 @@ auto-detection misses it.
    errors — the file still converts.
 4. **Save workbook** (or **Save workbook + import CSV**). It lands in
    `$TB_DATA/converted` with a download link on the page.
+5. **After payroll has imported it,** tick the file under *Converted files* and
+   click **Delete selected** to keep the list clean. The tick-box in the header
+   row selects everything. Deletion is permanent, asks for confirmation first,
+   and is logged with the signed-in user — it only ever removes `.xlsx`/`.csv`
+   files inside the converted folder, never source files or anything else.
 
 ### Testing the folder hand-off
 

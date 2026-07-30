@@ -268,6 +268,12 @@ BASE_CSS = """
   a.dl:hover { text-decoration: underline; }
   .empty { color: var(--stem); font-size: 14px; padding: 6px 0; }
   td.code, th.code { font-family: Consolas, "Courier New", monospace; }
+  td.pick, th.pick { width: 26px; padding-right: 4px; }
+  button.danger { background: var(--card); color: var(--apple);
+    border: 1.5px solid var(--apple); }
+  button.danger:hover:enabled { background: var(--apple); color: #F7F5EE; }
+  button.danger:disabled { border-color: var(--mist); color: var(--stem); }
+  span.hint { color: var(--stem); font-size: 14px; }
 """
 
 INDEX_PAGE = """
@@ -334,13 +340,52 @@ INDEX_PAGE = """
   <div class="card">
     <h2>Converted files</h2>
     {% if recent %}
+    <form method="post" action="{{ url_for('delete_files') }}" id="cleanup"
+          onsubmit="return confirmDelete()">
     <table>
-      <tr><th>File</th><th>Created</th><th class="num">Size</th><th></th></tr>
+      <tr>
+        <th class="pick"><input type="checkbox" id="all" onclick="toggleAll(this)"
+              aria-label="Select all files"></th>
+        <th>File</th><th>Created</th><th class="num">Size</th><th></th></tr>
       {% for f in recent %}
-      <tr><td>{{ f.name }}</td><td>{{ f.when }}</td><td class="num">{{ f.size }}</td>
+      <tr><td class="pick"><input type="checkbox" name="files" value="{{ f.name }}"
+              onclick="countPicked()" aria-label="Select {{ f.name }}"></td>
+        <td>{{ f.name }}</td><td>{{ f.when }}</td><td class="num">{{ f.size }}</td>
         <td><a class="dl" href="{{ url_for('download', filename=f.name) }}">Download</a></td></tr>
       {% endfor %}
     </table>
+    <div class="row">
+      <button type="submit" class="danger" id="delbtn" disabled>Delete selected</button>
+      <span class="hint" id="delhint">Tick the files you've already imported.</span>
+    </div>
+    </form>
+    <script>
+      function picked() {
+        return Array.from(document.querySelectorAll('input[name=files]'))
+                    .filter(function (c) { return c.checked; });
+      }
+      function countPicked() {
+        var n = picked().length;
+        var btn = document.getElementById('delbtn');
+        btn.disabled = n === 0;
+        btn.textContent = n ? 'Delete ' + n + ' selected' : 'Delete selected';
+        document.getElementById('delhint').textContent = n
+          ? 'This removes them from the server for good.'
+          : "Tick the files you've already imported.";
+      }
+      function toggleAll(box) {
+        document.querySelectorAll('input[name=files]').forEach(function (c) {
+          c.checked = box.checked;
+        });
+        countPicked();
+      }
+      function confirmDelete() {
+        var names = picked().map(function (c) { return c.value; });
+        if (!names.length) { return false; }
+        return confirm('Delete ' + names.length + ' file(s)?\n\n' + names.join('\n') +
+                       '\n\nThis cannot be undone.');
+      }
+    </script>
     {% else %}
       <p class="empty">Nothing converted yet. Saved workbooks show up here to download.</p>
     {% endif %}
@@ -698,6 +743,54 @@ def download(filename):
         flash("Only converted .xlsx and .csv files can be downloaded.", "err")
         return redirect(url_for("index"))
     return send_from_directory(CFG["output_dir"], name, as_attachment=True)
+
+
+@app.post("/delete")
+def delete_files():
+    """Remove converted files staff have finished importing.
+
+    Only touches .xlsx/.csv directly inside the output folder — the name is
+    sanitised and the resolved path is checked against that folder, so a
+    crafted name can't reach anything else on disk.
+    """
+    requested = request.form.getlist("files")
+    if not requested:
+        flash("Nothing selected — tick the files you want to remove.", "err")
+        return redirect(url_for("index"))
+
+    out_dir = CFG["output_dir"].resolve()
+    gone, missing, refused = [], [], []
+
+    for raw in requested:
+        name = secure_filename(raw)
+        if not name or not name.lower().endswith((".xlsx", ".csv")):
+            refused.append(raw)
+            continue
+        target = (out_dir / name).resolve()
+        if target.parent != out_dir:
+            refused.append(raw)
+            continue
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            missing.append(name)
+        except OSError as exc:
+            refused.append(f"{name} ({exc.strerror})")
+        else:
+            gone.append(name)
+
+    if gone:
+        who = signed_in_user()
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  deleted: {', '.join(gone)}"
+              f"{' by ' + who if who else ''}", flush=True)
+        flash(f"Deleted {len(gone)} file{'' if len(gone) == 1 else 's'}: "
+              f"{', '.join(str(escape(n)) for n in gone)}", "ok")
+    if missing:
+        flash(f"Already gone: {', '.join(str(escape(n)) for n in missing)}", "ok")
+    if refused:
+        flash(f"Left alone (not a converted file): "
+              f"{', '.join(str(escape(n)) for n in refused)}", "err")
+    return redirect(url_for("index"))
 
 
 @app.errorhandler(413)
