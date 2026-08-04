@@ -301,6 +301,11 @@ passed through unchanged and flagged on the preview rather than guessed at. If
 the file name carries a date too (`NF-Y2026M07D20`) and it disagrees with the
 rows, the preview says so — usually a sign the wrong day's file was picked up.
 
+**The labor allocation is trimmed to its location.** Paycom wants only the
+first 3 digits followed by a pipe, so `10100121` is written as `101|`. Anything
+non-numeric passes through unchanged and is flagged on the preview rather than
+truncated into a different valid-looking code.
+
 **Badge numbers are zero-padded to 7 digits** on the way out, because that is
 the width Paycom expects: SIMS writes `0303`, the workbook carries `0000303`.
 A badge that is already 7 digits is left alone; one that is longer, or not
@@ -322,7 +327,7 @@ a house employee number, that's a small change to `convert()`.
 | 2 — line number | *(not imported)* |
 | 3 — packer ID (`0303`) | A — Employee ID, **zero-padded to 7 digits** (`0000303`) |
 | 4 — SIMS package code (`510`) | F — Earning Code, **translated to Paycom** (`T10`) |
-| 5 — allocation (`10100121`) | I — Labor Allocation Code (number) |
+| 5 — allocation (`10100121`) | I — Labor Allocation Code, **trimmed to its location plus a pipe** (`101\|`) |
 | 6 — pieces (`0001`) | N — Units (text, leading zeros kept) |
 
 ## Reference

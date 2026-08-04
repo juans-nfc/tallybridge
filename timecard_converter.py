@@ -84,7 +84,8 @@ class Row(NamedTuple):
     sims_code: str       # source code, kept for display and troubleshooting
     paycom_code: str     # column F — what payroll actually receives
     description: str     # Paycom description, for the preview screen
-    alloc: object        # column I
+    alloc: object        # column I — location prefix plus a pipe, e.g. "101|"
+    alloc_raw: str       # the allocation exactly as SIMS wrote it
     units: str           # column N
 
     @property
@@ -95,6 +96,11 @@ class Row(NamedTuple):
     def assigned(self) -> bool:
         """False for rows the line wrote with no packer ID in them."""
         return bool(self.emp_id)
+
+    @property
+    def alloc_ok(self) -> bool:
+        """True when the allocation was trimmed to its location prefix."""
+        return self.alloc != self.alloc_raw
 
     @property
     def date_ok(self) -> bool:
@@ -182,6 +188,24 @@ def normalize_date(raw: str):
     return code, False
 
 
+# Paycom wants only the location part of the labor allocation, followed by a
+# pipe: SIMS writes 10100121, the workbook carries "101|".
+ALLOC_KEEP_DIGITS = 3
+
+
+def normalize_alloc(raw: str):
+    """Trim the labor allocation to its location prefix plus a pipe.
+
+    Returns (value, recognised). Anything shorter than the prefix, or not
+    numeric, is passed through untouched and flagged rather than truncated
+    into a different valid-looking code.
+    """
+    alloc = raw.strip()
+    if len(alloc) >= ALLOC_KEEP_DIGITS and alloc.isdigit():
+        return f"{alloc[:ALLOC_KEEP_DIGITS]}|", True
+    return alloc, False
+
+
 # Expected field widths, used only to work out which column is missing when a
 # fixed-width file happens to have one column blank on every single row.
 EXPECTED_WIDTHS = {"date": 9, "emp": 4, "code": 3, "alloc": 8, "units": 4}
@@ -260,9 +284,7 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
         paycom_code, description = translate_code(sims_code)
         pack_date, _date_ok = normalize_date(date_code)
 
-        # Labor Allocation Code is stored as a number (matches the sample
-        # payroll prepared); fall back to text if it's ever non-numeric.
-        alloc_val = int(alloc) if alloc.isdigit() else alloc
+        alloc_val, _alloc_ok = normalize_alloc(alloc)
 
         rows.append(Row(
             emp_id=normalize_emp_id(emp_id),
@@ -273,6 +295,7 @@ def parse_txt(txt_path: Path, strict: bool = False) -> list:
             paycom_code=paycom_code,
             description=description,
             alloc=alloc_val,
+            alloc_raw=alloc.strip(),
             units=units,
         ))
 

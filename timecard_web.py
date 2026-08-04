@@ -163,6 +163,12 @@ def summarize(all_rows, source_name):
                 f"The file name says {from_name} but the rows are dated "
                 f"{', '.join(date_codes)} — check this is the file you meant.")
 
+    odd_alloc = sorted({r.alloc_raw for r in rows if not r.alloc_ok})
+    if odd_alloc:
+        notes.append(
+            f"Labor allocation(s) {', '.join(repr(a) for a in odd_alloc)} aren't a "
+            f"numeric code — they go to Paycom unchanged rather than being trimmed.")
+
     odd = sorted({r.emp_id_raw for r in rows if r.odd_badge})
     if odd:
         notes.append(
@@ -218,11 +224,13 @@ def summarize(all_rows, source_name):
 
     pad_example = next(((r.emp_id_raw, r.emp_id) for r in rows if r.padded), None)
     date_example = next(((r.date_code_raw, r.date_code) for r in rows if r.date_ok), None)
+    alloc_example = next(((r.alloc_raw, r.alloc) for r in rows if r.alloc_ok), None)
 
     return {
         "source": source_name,
         "pad_example": pad_example,
         "date_example": date_example,
+        "alloc_example": alloc_example,
         "row_count": len(rows),
         "orphan_count": len(orphans),
         "orphan_units": orphan_units,
@@ -548,20 +556,22 @@ PREVIEW_PAGE = """
     <h2>Exactly what goes in the workbook</h2>
     <div class="scroll"><table>
       <tr><th>A &mdash; Employee ID</th><th>C &mdash; Date</th>
-        <th>F &mdash; Earning Code</th><th class="num">I &mdash; Allocation</th>
+        <th>F &mdash; Earning Code</th><th>I &mdash; Allocation</th>
         <th>N &mdash; Units</th><th>from SIMS</th></tr>
       {% for r in rows %}
       <tr{% if not r.mapped %} class="unmapped"{% endif %}>
         <td>{{ r.emp_id }}</td><td>{{ r.date_code }}</td>
         <td class="code"><strong>{{ r.paycom_code }}</strong></td>
-        <td class="num">{{ r.alloc }}</td><td>{{ r.units }}</td>
+        <td class="code">{{ r.alloc }}</td><td>{{ r.units }}</td>
         <td class="was">{{ r.sims_code }}{% if r.description %} &middot; {{ r.description }}{% endif %}</td></tr>
       {% endfor %}
     </table></div>
-    <p class="hint">Employee ID is zero-padded to {{ emp_width }} digits for Paycom{% if s.pad_example %}
-       (badge {{ s.pad_example[0] }} becomes {{ s.pad_example[1] }}){% endif %}, and the
-       batch code becomes the pack date{% if s.date_example %}
-       ({{ s.date_example[0] }} becomes {{ s.date_example[1] }}){% endif %}.
+    <p class="hint">Converted for Paycom: Employee ID zero-padded to {{ emp_width }} digits{% if s.pad_example %}
+       ({{ s.pad_example[0] }} &rarr; {{ s.pad_example[1] }}){% endif %};
+       batch code to pack date{% if s.date_example %}
+       ({{ s.date_example[0] }} &rarr; {{ s.date_example[1] }}){% endif %}{% if s.alloc_example %};
+       labor allocation trimmed to its location
+       ({{ s.alloc_example[0] }} &rarr; {{ s.alloc_example[1] }}){% endif %}.
        {% if truncated %}Showing the first {{ rows | length }} of {{ s.row_count }} rows;
        all {{ s.row_count }} are saved.{% endif %}</p>
 
